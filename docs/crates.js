@@ -1,0 +1,1 @@
+window.ALL_CRATES = ["approx","libm","multibody_dynamics","nalgebra","num_complex","num_integer","num_rational","num_traits","paste","simba","typenum"];

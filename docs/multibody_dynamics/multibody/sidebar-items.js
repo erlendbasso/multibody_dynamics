@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":[["JointType",""]],"struct":[["MultiBody",""]],"trait":[["IntoHomogenousConfigurationVec","Allows overloading of functions for both a single 6DOF configuration and for a vector of 6DOF configurations, which is required when there are more than one 6DOF joint in the multibody system."]]};

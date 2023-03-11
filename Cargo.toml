@@ -7,5 +7,9 @@ edition = "2021"
 
 [dependencies]
 nalgebra = {version = "0.32", default-features = false, features = ["libm", "alloc"]}
+num-traits     = { version = "0.2", default-features = false, features = ["libm"] }
+# num-traits     = { version = "0.2" }
 # nalgebra = "0.32"
+# typenum        = "1.12"
+# num-traits     = { version = "0.2", default-features = false }
 approx = "0.5"
