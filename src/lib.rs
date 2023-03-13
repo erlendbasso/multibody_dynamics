@@ -7,6 +7,7 @@ This crate is a multibody dynamics library providing algorithms for computing fo
 */
 
 #![cfg_attr(feature = "no_std", no_std)]
+#![allow(non_snake_case)]
 
 #[cfg(feature = "no_std")]
 extern crate core as std;
@@ -18,4 +19,4 @@ extern crate core as std;
 
 
 pub mod multibody;
-mod math_functions;
+pub mod math_functions;

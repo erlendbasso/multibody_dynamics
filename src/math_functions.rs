@@ -1,8 +1,14 @@
+#![allow(non_snake_case)]
+#![allow(dead_code)]
 extern crate nalgebra as na;
 
-use na::{SMatrix, OMatrix, OVector, Vector3, Vector6, Matrix3, Matrix6, Isometry3, U6, Dyn};
+use na::{SMatrix, OMatrix, OVector, Vector3, Vector6, Matrix3, Matrix6, Isometry3, Dyn};
 
 use core::ops::Mul;
+
+
+
+
 fn test_scalar_mult<T>(a: T, b: Vector3<T>) -> Vector3<T> 
 where 
 T: na::Scalar + num_traits::Zero + num_traits::One + na::ClosedAdd + na::ClosedMul , {

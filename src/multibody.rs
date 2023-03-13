@@ -21,13 +21,13 @@ pub enum JointType {
 }
 
 /// Returns the number of DOFs for a given joint type.
-const fn dofs_joint(joint_type: &JointType) -> usize {
-    match joint_type {
-        JointType::Revolute => 1,
-        JointType::Prismatic => 1,
-        JointType::SixDOF => 6,
-    }
-}
+// const fn dofs_joint(joint_type: &JointType) -> usize {
+//     match joint_type {
+//         JointType::Revolute => 1,
+//         JointType::Prismatic => 1,
+//         JointType::SixDOF => 6,
+//     }
+// }
 
 /// Allows overloading of functions for both a single 6DOF configuration and for a vector of 6DOF configurations, which is required when there are more than one 6DOF joint in the multibody system.
 pub trait IntoHomogenousConfigurationVec {
@@ -128,7 +128,24 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
                         None => Matrix6::zeros(),
                     };
                     let inertia_mat = inertia_matrices.as_ref().expect("The 3x3 inertia matrices must be provided if the 6x6 mass matrix is not given.")[i];
-                    mass_mats[i] = comp_rb_mass_matrix(m, &r, &inertia_mat) + added_mass_i;
+                    mass_mats[i] = ({
+                        let r = &r;
+                        let inertia_mat = &inertia_mat;
+                        let mut mass_matrix = Matrix6::zeros();
+                        mass_matrix
+                            .fixed_view_mut::<3, 3>(0, 0)
+                            .copy_from(&(m * Matrix3::identity()));
+                        mass_matrix
+                            .fixed_view_mut::<3, 3>(0, 3)
+                            .copy_from(&(-m * skew(&r)));
+                        mass_matrix
+                            .fixed_view_mut::<3, 3>(3, 0)
+                            .copy_from(&(m * skew(&r)));
+                        mass_matrix
+                            .fixed_view_mut::<3, 3>(3, 3)
+                            .copy_from(&inertia_mat);
+                        mass_matrix
+                    }) + added_mass_i;
                 }
                 mass_mats
             }
@@ -689,7 +706,7 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
         let mut j = body_id;
         let lambda = |x: usize| -> i32 { self.parent[x] as i32 - 1 };
 
-        let mut Ad_h_inv = SMatrix::<f64, 6, 6>::identity();
+        let mut Ad_h_inv : SMatrix::<f64, 6, 6>;
         let mut nu = SVector::<f64, 6>::zeros();
         let mut h = Isometry3::<f64>::identity();
 
@@ -717,10 +734,6 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
                 .copy_from(&jac_j);
         }
         jacobian_deriv
-    }
-
-    fn lambda(&self, x: usize) -> i32 {
-        self.parent[x] as i32 - 1
     }
 }
 
@@ -905,7 +918,7 @@ mod tests {
         // let sigma_prime = SVector::<f64, 14>::from_vec(vec![0.0, 0.0, 0.0, 0.0, 0.0, 1.0,0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
         let eta = SVector::<f64, 14>::zeros();
         // let rigid_body_forces = vec![Vector6::<f64>::zeros(); 9];
-        let rigid_body_forces_func = |x: &Isometry3<f64>, y: &Vector6<f64>, z: &Vector6<f64>| -> Vector6<f64> { 0.0 * y + 0.0 * z };
+        let rigid_body_forces_func = |_x: &Isometry3<f64>, y: &Vector6<f64>, z: &Vector6<f64>| -> Vector6<f64> { 0.0 * y + 0.0 * z };
 
         let zeta = multibody.generalized_newton_euler(
             &conf,
@@ -1024,7 +1037,7 @@ mod tests {
         assert_relative_eq!(jacs[7].column(6), jac.column(6), epsilon = 0.00000001);
 
         for i in 0..6 {
-            let i = 0;
+            // let i = 0;
             assert_relative_eq!(djacs[7].column(i), djac.column(i), epsilon = 0.00000001);
         }
 
@@ -1146,7 +1159,7 @@ mod tests {
 
 
         let damping_func = |x: &Vector6<f64>| -> Vector6<f64> { 0.0 * x };
-        let rigid_body_forces_func = |x: &Isometry3<f64>, y: &Vector6<f64>, z: &Vector6<f64>| -> Vector6<f64> { 0.0 * y + 0.0 * z };
+        let rigid_body_forces_func = |_x: &Isometry3<f64>, y: &Vector6<f64>, z: &Vector6<f64>| -> Vector6<f64> { 0.0 * y + 0.0 * z };
         // let lambda = |x: usize| -> i32 { self.parent[x] as i32 - 1 };
 
         let thruster_forces = vec![Vector6::<f64>::zeros(); 9];
