@@ -28,7 +28,7 @@ pub fn Ad_inv(h: &Isometry3<f64>) -> Matrix6<f64> {
 
     Ad_h_inv
         .fixed_view_mut::<3, 3>(0, 3)
-        .copy_from(&(skew(&p) * &R_inv));
+        .copy_from(&(skew(&p) * R_inv));
     Ad_h_inv.fixed_view_mut::<3, 3>(3, 3).copy_from(&R_inv);
     Ad_h_inv
 }
@@ -43,7 +43,7 @@ pub fn Ad(h: &Isometry3<f64>) -> Matrix6<f64> {
 
     Ad_h
         .fixed_view_mut::<3, 3>(0, 3)
-        .copy_from(&(skew(&p) * &R));
+        .copy_from(&(skew(&p) * R));
     Ad_h.fixed_view_mut::<3, 3>(3, 3).copy_from(&R);
     Ad_h
 }
@@ -107,12 +107,12 @@ pub fn comp_rb_mass_matrix(m: f64, r: &Vector3<f64>, inertia_mat: &Matrix3<f64>)
         .copy_from(&(m * Matrix3::identity()));
     mass_matrix
         .fixed_view_mut::<3, 3>(0, 3)
-        .copy_from(&(-m * skew(&r)));
+        .copy_from(&(-m * skew(r)));
     mass_matrix
         .fixed_view_mut::<3, 3>(3, 0)
-        .copy_from(&(m * skew(&r)));
+        .copy_from(&(m * skew(r)));
     mass_matrix
         .fixed_view_mut::<3, 3>(3, 3)
-        .copy_from(&inertia_mat);
+        .copy_from(inertia_mat);
     mass_matrix
 }

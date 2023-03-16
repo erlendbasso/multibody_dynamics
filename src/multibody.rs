@@ -111,7 +111,7 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
                         .copy_from(&Matrix6::identity());
                     joint_dims[i] = 6;
 
-                    joint_size_offsets += joint_dims[i] as usize - 1;
+                    joint_size_offsets += joint_dims[i] - 1;
                 }
             }
         }
@@ -137,13 +137,13 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
                             .copy_from(&(m * Matrix3::identity()));
                         mass_matrix
                             .fixed_view_mut::<3, 3>(0, 3)
-                            .copy_from(&(-m * skew(&r)));
+                            .copy_from(&(-m * skew(r)));
                         mass_matrix
                             .fixed_view_mut::<3, 3>(3, 0)
-                            .copy_from(&(m * skew(&r)));
+                            .copy_from(&(m * skew(r)));
                         mass_matrix
                             .fixed_view_mut::<3, 3>(3, 3)
-                            .copy_from(&inertia_mat);
+                            .copy_from(inertia_mat);
                         mass_matrix
                     }) + added_mass_i;
                 }
@@ -153,25 +153,25 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
 
 
         Ok(MultiBody {
-            offset_matrices: offset_matrices,
-            mass_matrices: mass_matrices,
-            joint_types: joint_types,
-            parent: parent,
+            offset_matrices,
+            mass_matrices,
+            joint_types,
+            parent,
             g: vec![Isometry3::identity(); NUM_BODIES],
             h: vec![Isometry3::identity(); NUM_BODIES],
             nu: vec![Vector6::zeros(); NUM_BODIES],
             nu_prime: vec![Vector6::zeros(); NUM_BODIES],
             alpha: vec![Vector6::zeros(); NUM_BODIES],
-            Phi: Phi,
-            joint_dims: joint_dims,
+            Phi,
+            joint_dims,
             joint_size_offsets: joint_offset_vec,
             jacobians: vec![SMatrix::<f64, 6, NUM_DOFS>::zeros(); NUM_BODIES],
-            gravity: gravity,
-            r_com: r_com,
-            r_cob: r_cob,
-            mass: mass,
-            volume: volume,
-            rho: rho,
+            gravity,
+            r_com,
+            r_cob,
+            mass,
+            volume,
+            rho,
         })
     }
 
@@ -198,18 +198,18 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
                         UnitQuaternion::from_axis_angle(&Vector3::z_axis(), scalar_joint_vars[j]);
 
                     conf[i] = temp;
-                    j = j + 1;
+                    j += 1;
                 }
                 JointType::Prismatic => {
                     let mut temp = Isometry3::identity();
                     temp.translation = Translation3::new(0.0, 0.0, scalar_joint_vars[j]);
 
                     conf[i] = temp;
-                    j = j + 1;
+                    j += 1;
                 }
                 JointType::SixDOF => {
                     conf[i] = six_dof_vars[k];
-                    k = k + 1;
+                    k += 1;
                 }
             }
         }
@@ -217,7 +217,7 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
     }
     pub fn generalized_newton_euler(
         &mut self,
-        conf: &Vec<Isometry3<f64>>,
+        conf: &[Isometry3<f64>],
         mu: &SVector<f64, NUM_DOFS>,
         mu_prime: &SVector<f64, NUM_DOFS>,
         sigma_prime: &SVector<f64, NUM_DOFS>,
@@ -374,7 +374,7 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
                 * self.mass_matrices[node_idx]
                 * self.nu[node_idx]
             // + rigid_body_forces
-            + rigid_body_forces(&conf, &self.nu[node_idx], &self.nu_prime[node_idx])
+            + rigid_body_forces(conf, &self.nu[node_idx], &self.nu_prime[node_idx])
     }
 
     /// Computes the mass matrix of the multibody system using the composite rigid body algorithm (CRB). Assumes that GNE/MNE/AB has been called.
@@ -392,19 +392,19 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
             }
             let idx = i + self.joint_size_offsets[i];
 
-            let Phi_i: OMatrix<f64, U6, Dyn>;
+            
 
-            match self.joint_types[i] {
+            let Phi_i: OMatrix<f64, U6, Dyn> = match self.joint_types[i] {
                 JointType::Revolute | JointType::Prismatic => {
-                    Phi_i = OMatrix::from_columns(&[self.Phi.fixed_view::<6, 1>(0, idx)]);
+                    OMatrix::from_columns(&[self.Phi.fixed_view::<6, 1>(0, idx)])
                 }
                 JointType::SixDOF => {
-                    Phi_i = OMatrix::<f64, U6, Dyn>::from_iterator(
+                    OMatrix::<f64, U6, Dyn>::from_iterator(
                         6,
                         self.Phi.fixed_view::<6, 6>(0, idx).iter().cloned(),
-                    );
+                    )
                 }
-            }
+            };
             let mut X = M_c[i] * &Phi_i;
             M_o.view_mut((idx, idx), (self.joint_dims[i], self.joint_dims[i]))
                 .copy_from(&(Phi_i.transpose() * &X));
@@ -415,24 +415,24 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
             while lambda(j) >= 0 {
                 X = Ad(&self.h[j].inverse()).transpose() * X;
                 j = lambda(j) as usize;
-                let Phi_j: OMatrix<f64, U6, Dyn>;
+                
 
-                match self.joint_types[j] {
+                let Phi_j: OMatrix<f64, U6, Dyn> = match self.joint_types[j] {
                     JointType::Revolute | JointType::Prismatic => {
-                        Phi_j = OMatrix::from_columns(&[self
+                        OMatrix::from_columns(&[self
                             .Phi
-                            .fixed_view::<6, 1>(0, j + self.joint_size_offsets[j])]);
+                            .fixed_view::<6, 1>(0, j + self.joint_size_offsets[j])])
                     }
                     JointType::SixDOF => {
-                        Phi_j = OMatrix::<f64, U6, Dyn>::from_iterator(
+                        OMatrix::<f64, U6, Dyn>::from_iterator(
                             6,
                             self.Phi
                                 .fixed_view::<6, 6>(0, j + self.joint_size_offsets[j])
                                 .iter()
                                 .cloned(),
-                        );
+                        )
                     }
-                }
+                };
                 let temp = X.transpose() * &Phi_j;
 
                 M_o.view_mut(
@@ -453,11 +453,10 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
     /// Computes the forward dynamics using the articulated body algorithm (AB).
     pub fn forward_dynamics_ab(
         &mut self,
-        conf: &Vec<Isometry3<f64>>,
+        conf: &[Isometry3<f64>],
         mu: &SVector<f64, NUM_DOFS>,
-        // damping_forces: &Vec<Vector6<f64>>,
         damping_func: fn(&Vector6<f64>) -> Vector6<f64>,
-        thruster_forces: &Vec<Vector6<f64>>,
+        thruster_forces: &[Vector6<f64>],
         eta: &SVector<f64, NUM_DOFS>,
         lin_vel_current: &Vector3<f64>,
         lin_accel_current: &Vector3<f64>,
@@ -499,7 +498,7 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
             let quat = UnitQuaternion::from_quaternion(*self.h[i].rotation.quaternion());
             b[i] = -ad_se3(&self.nu[i]).transpose() * M_a[i] * self.nu[i]
                 - damping_func(&self.nu[i])
-                - self.compute_hydrostatic_force(&quat, &lin_accel_current, i)
+                - self.compute_hydrostatic_force(&quat, lin_accel_current, i)
                 - thruster_forces[i];
         }
 
@@ -517,7 +516,7 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
                 let mu_i = mu.rows(idx, self.joint_dims[i]);
 
                 let M_bar = M_a[i] - &U_i * &V_i_inv * &U_i.transpose();
-                let b_bar = b[i] + &M_bar * ad_se3(&self.nu[i]) * &Phi_i * &mu_i + &U_i * &V_i_inv * &u_i;
+                let b_bar = b[i] + M_bar * ad_se3(&self.nu[i]) * Phi_i * mu_i + &U_i * &V_i_inv * &u_i;
                 
                 let Ad_h_i_inv = Ad(&self.h[i].inverse());
                 M_a[lambda(i) as usize] = M_a[lambda(i) as usize] + Ad_h_i_inv.transpose() * M_bar * Ad_h_i_inv;
@@ -540,13 +539,13 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
             let mu_i = mu.rows(idx, self.joint_dims[i]);
 
             let Ad_h_i_inv = Ad(&self.h[i].inverse());
-            let alpha_bar : SVector<f64, 6>;
+            
 
-            if lambda(i) == -1 {
-                alpha_bar = Ad_h_i_inv * alpha_0 + ad_se3(&self.nu[i]) * Phi_i * mu_i;
+            let alpha_bar : SVector<f64, 6> = if lambda(i) == -1 {
+                Ad_h_i_inv * alpha_0 + ad_se3(&self.nu[i]) * Phi_i * mu_i
             } else {
-                alpha_bar = Ad_h_i_inv * self.alpha[lambda(i) as usize] + ad_se3(&self.nu[i]) * Phi_i * mu_i;
-            }
+                Ad_h_i_inv * self.alpha[lambda(i) as usize] + ad_se3(&self.nu[i]) * Phi_i * mu_i
+            };
             let temp = &V_inv[i] * (&u[i] - &U_vec[i].transpose() * alpha_bar);
             sigma.rows_mut(idx, self.joint_dims[i]).copy_from(&temp);
 
@@ -565,10 +564,7 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
         let mut hydrostatic_force = Vector6::<f64>::zeros();
 
         let Rot = quat.to_rotation_matrix();
-        let rho = match self.rho {
-            Some(rho) => rho,
-            None => 0.0,
-        };
+        let rho = self.rho.unwrap_or(0.0);
         let volume = match &self.volume {
             Some(volume) => volume[body_id],
             None => 0.0,
@@ -600,7 +596,7 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
 
     pub fn compute_jacobians(
         &mut self,
-        config: &Vec<Isometry3<f64>>,
+        config: &[Isometry3<f64>],
     ) -> Vec<SMatrix<f64, 6, NUM_DOFS>> {
         for i in 0..NUM_BODIES {
             let idx = i + self.joint_size_offsets[i];
@@ -660,7 +656,7 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
 
     pub fn compute_jacobian(
         &self,
-        config: &Vec<Isometry3<f64>>,
+        config: &[Isometry3<f64>],
         body_id: usize,
     ) -> SMatrix<f64, 6, NUM_DOFS> {
         let mut jacobian = SMatrix::<f64, 6, NUM_DOFS>::zeros();
@@ -697,7 +693,7 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
 
     pub fn compute_jacobian_derivative(
         &self,
-        config: &Vec<Isometry3<f64>>,
+        config: &[Isometry3<f64>],
         mu: &SVector<f64, NUM_DOFS>,
         body_id: usize,
     ) -> SMatrix<f64, 6, NUM_DOFS> {
@@ -721,7 +717,7 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
                 h = h_j;
             } else {
                 Ad_h_inv = Ad(&h.inverse());
-                nu = nu + Ad_h_inv * Phi_j * mu_j;
+                nu += Ad_h_inv * Phi_j * mu_j;
                 h = h_j * h;
             }
             j = lambda(j) as usize;
@@ -1121,6 +1117,7 @@ mod tests {
         ) - m2 * skew(&r_cg2) * skew(&r_cg2);
 
         let mut M_1 = comp_mass_matrix(m1, &r_cg1, &inertia_mat1);
+        M_1[(0, 0)] = 10.0;
         let M_2 = comp_mass_matrix(m2, &r_cg2, &inertia_mat2);
 
         
@@ -1180,9 +1177,7 @@ mod tests {
 
         assert_relative_eq!(accel, accel2, epsilon = 1e-7);
 
-        M_1[(0, 0)] = 10.0;
-        // M_2[(0, 0)] = 10.0;
-
+        
         let lin_vel_current = Vector3::new(10.0, 20.0, 30.0);
         let accel3 = multibody.forward_dynamics_ab(&conf, &mu, damping_func, &thruster_forces, &eta, &lin_vel_current, &lin_accel_current);
 
