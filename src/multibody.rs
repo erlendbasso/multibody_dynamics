@@ -222,7 +222,8 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
         mu_prime: &SVector<f64, NUM_DOFS>,
         sigma_prime: &SVector<f64, NUM_DOFS>,
         // rigid_body_forces: &Vec<Vector6<f64>>,
-        rigid_body_forces: fn(&Isometry3<f64>, &Vector6<f64>, &Vector6<f64>) -> Vector6<f64>,
+        // rigid_body_forces: fn(&Isometry3<f64>, &Vector6<f64>, &Vector6<f64>) -> Vector6<f64>,
+        rigid_body_forces: &dyn Fn(&Vector6<f64>, &Vector6<f64>, usize) -> Vector6<f64>,
         eta: &SVector<f64, NUM_DOFS>,
     ) -> SVector<f64, NUM_DOFS> {
         let mut w: Vec<Vector6<f64>> = vec![Vector6::zeros(); NUM_BODIES];
@@ -242,6 +243,7 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
                         &mu_prime_i,
                         &sigma_prime_i,
                         // &rigid_body_forces[i],
+                        // rigid_body_forces,
                         rigid_body_forces,
                         i,
                     );
@@ -273,13 +275,13 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
                     let Phi_i = self.Phi.fixed_view::<6, 1>(0, idx);
                     // zeta[i] = (Phi_i.transpose() * w[i])[(0, 0)] + eta[idx];
                     zeta.fixed_view_mut::<1, 1>(idx, 0)
-                        .copy_from(&((Phi_i.transpose() * w[i]) + Matrix1::new(eta[idx])));
+                        .copy_from(&((Phi_i.transpose() * w[i]) - Matrix1::new(eta[idx])));
                 }
                 JointType::SixDOF => {
                     let idx = i + self.joint_size_offsets[i];
                     let Phi_i = self.Phi.fixed_view::<6, 6>(0, idx);
                     zeta.fixed_view_mut::<6, 1>(idx, 0)
-                        .copy_from(&(Phi_i.transpose() * w[i] + eta.fixed_rows::<6>(idx)));
+                        .copy_from(&(Phi_i.transpose() * w[i] - eta.fixed_rows::<6>(idx)));
                 }
             }
 
@@ -299,7 +301,8 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
         mu_prime: &SVector<f64, D>,
         sigma_prime: &SVector<f64, D>,
         // rigid_body_forces: &SVector<f64, 6>,
-        rigid_body_forces: fn(&Isometry3<f64>, &Vector6<f64>, &Vector6<f64>) -> Vector6<f64>,
+        // rigid_body_forces: fn(&Isometry3<f64>, &Vector6<f64>, &Vector6<f64>) -> Vector6<f64>,
+        rigid_body_forces: &dyn Fn(&Vector6<f64>, &Vector6<f64>, usize) -> Vector6<f64>,
         node_idx: usize,
     ) -> Vector6<f64> {
         let idx_offset = self.joint_size_offsets[node_idx];
@@ -374,7 +377,8 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
                 * self.mass_matrices[node_idx]
                 * self.nu[node_idx]
             // + rigid_body_forces
-            + rigid_body_forces(conf, &self.nu[node_idx], &self.nu_prime[node_idx])
+            - rigid_body_forces(&self.nu[node_idx], &self.nu_prime[node_idx], node_idx)
+            // + rigid_body_forces(conf, &self.nu[node_idx], &self.nu_prime[node_idx])
     }
 
     /// Computes the mass matrix of the multibody system using the composite rigid body algorithm (CRB). Assumes that GNE/MNE/AB has been called.
@@ -455,7 +459,7 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
         &mut self,
         conf: &[Isometry3<f64>],
         mu: &SVector<f64, NUM_DOFS>,
-        damping_func: fn(&Vector6<f64>) -> Vector6<f64>,
+        damping_func: &dyn Fn(&Vector6<f64>, &Vector6<f64>, usize) -> Vector6<f64>,
         thruster_forces: &[Vector6<f64>],
         eta: &SVector<f64, NUM_DOFS>,
         lin_vel_current: &Vector3<f64>,
@@ -494,10 +498,13 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
                 self.nu[i] = Ad(&self.h[i].inverse()) * self.nu[lambda(i) as usize] + Phi_i * mu_i;
                 a_e[i] = self.h[i].rotation.inverse() * a_e[lambda(i) as usize];
             }
-
+            // println!("DAMPING BODY : {} : {}", i, damping_func(&self.nu[i], &self.nu[i], i));
             let quat = UnitQuaternion::from_quaternion(*self.h[i].rotation.quaternion());
+            // println!("HYDROSTATIC FORCE BODY : {} : {}", i, self.compute_hydrostatic_force(&quat, lin_accel_current, i));
+            // let test = self.compute_jacobian(&conf, i).transpose() * damping_func(&self.nu[i], &self.nu[i], i);
+            // println!("TEST {} : {}", i, test);
             b[i] = -ad_se3(&self.nu[i]).transpose() * M_a[i] * self.nu[i]
-                - damping_func(&self.nu[i])
+                - damping_func(&self.nu[i], &self.nu[i], i)
                 - self.compute_hydrostatic_force(&quat, lin_accel_current, i)
                 - thruster_forces[i];
         }
@@ -812,7 +819,9 @@ mod tests {
         let sigma_prime = Vector2::new(0.0, 0.0);
         let eta = SVector::<f64, 2>::zeros();
         // let rigid_body_forces = vec![Vector6::<f64>::zeros(); 2];
-        let rigid_body_forces_func = |_x: &Isometry3<f64>, y: &Vector6<f64>, z: &Vector6<f64>| -> Vector6<f64> { 0.0 * y + 0.0 * z };
+        let rigid_body_forces_func = &|x: &Vector6<f64>, y: &Vector6<f64>, i: usize| -> Vector6<f64> { 
+            0.0 * x 
+        };
 
         let zeta = multibody.generalized_newton_euler(
             &conf,
@@ -914,7 +923,9 @@ mod tests {
         // let sigma_prime = SVector::<f64, 14>::from_vec(vec![0.0, 0.0, 0.0, 0.0, 0.0, 1.0,0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
         let eta = SVector::<f64, 14>::zeros();
         // let rigid_body_forces = vec![Vector6::<f64>::zeros(); 9];
-        let rigid_body_forces_func = |_x: &Isometry3<f64>, y: &Vector6<f64>, z: &Vector6<f64>| -> Vector6<f64> { 0.0 * y + 0.0 * z };
+        let rigid_body_forces_func = &|x: &Vector6<f64>, y: &Vector6<f64>, i: usize| -> Vector6<f64> { 
+            0.0 * x 
+        };
 
         let zeta = multibody.generalized_newton_euler(
             &conf,
@@ -1120,8 +1131,6 @@ mod tests {
         M_1[(0, 0)] = 10.0;
         let M_2 = comp_mass_matrix(m2, &r_cg2, &inertia_mat2);
 
-        
-
         let mass_matrices = vec![M_1, M_2, M_1, M_2, M_1, M_2, M_1, M_2, M_1];
 
         // let mut multibody =
@@ -1154,9 +1163,15 @@ mod tests {
 
         let mu = SVector::<f64, 14>::repeat(1.0);
 
-
-        let damping_func = |x: &Vector6<f64>| -> Vector6<f64> { 0.0 * x };
-        let rigid_body_forces_func = |_x: &Isometry3<f64>, y: &Vector6<f64>, z: &Vector6<f64>| -> Vector6<f64> { 0.0 * y + 0.0 * z };
+        let damping_func = |x: &Vector6<f64>, y: &Vector6<f64>, i: usize| -> Vector6<f64> { 
+            0.0 * x 
+        };
+        // let damping_func = |x: &Vector6<f64>, i: usize| -> Box<dyn Fn(&Vector6<f64>) -> Vector6<f64> > { 
+        //     Box::new(0.0 * Vector6::<f64>::zeros()) 
+        // };
+        let rigid_body_forces_func = &|x: &Vector6<f64>, y: &Vector6<f64>, i: usize| -> Vector6<f64> { 
+            0.0 * x 
+        };
         // let lambda = |x: usize| -> i32 { self.parent[x] as i32 - 1 };
 
         let thruster_forces = vec![Vector6::<f64>::zeros(); 9];
@@ -1164,7 +1179,7 @@ mod tests {
         let lin_vel_current = SVector::<f64, 3>::zeros();
         let lin_accel_current = SVector::<f64, 3>::zeros();
 
-        let accel = multibody.forward_dynamics_ab(&conf, &mu, damping_func, &thruster_forces, &eta, &lin_vel_current, &lin_accel_current);
+        let accel = multibody.forward_dynamics_ab(&conf, &mu, &damping_func, &thruster_forces, &eta, &lin_vel_current, &lin_accel_current);
 
         let sigma_prime = SVector::<f64, 14>::zeros();
 
@@ -1174,14 +1189,12 @@ mod tests {
 
         let accel2 = - mass_mat.try_inverse().unwrap() * c_vec;
 
-
         assert_relative_eq!(accel, accel2, epsilon = 1e-7);
-
         
         let lin_vel_current = Vector3::new(10.0, 20.0, 30.0);
-        let accel3 = multibody.forward_dynamics_ab(&conf, &mu, damping_func, &thruster_forces, &eta, &lin_vel_current, &lin_accel_current);
+        let accel3 = multibody.forward_dynamics_ab(&conf, &mu, &damping_func, &thruster_forces, &eta, &lin_vel_current, &lin_accel_current);
 
-        println!("accel3: {}", accel3);
-        
+        println!("accel: {}", accel);
+        println!("accel2: {}", accel2);
     }
 }
