@@ -1,7 +1,12 @@
 [package]
 name = "multibody_dynamics"
 version = "0.1.0"
+authors = ["Erlend Basso <erlendbasso@gmail.com>"]
+description = "Multibody dynamics algorithms in Rust"
 edition = "2021"
+license = "GPL-3.0"
+homepage = "https://github.com/erlendbasso/multibody_dynamics"
+repository = "https://github.com/erlendbasso/multibody_dynamics"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -13,3 +18,4 @@ num-traits     = { version = "0.2", default-features = false, features = ["libm"
 # typenum        = "1.12"
 # num-traits     = { version = "0.2", default-features = false }
 approx = "0.5"
+
