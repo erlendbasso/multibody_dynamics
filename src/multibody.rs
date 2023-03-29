@@ -203,13 +203,12 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
         mu: &SVector<f64, NUM_DOFS>,
         mu_prime: &SVector<f64, NUM_DOFS>,
         sigma_prime: &SVector<f64, NUM_DOFS>,
-        rigid_body_forces: &dyn Fn(&Vector6<f64>, &Vector6<f64>, usize) -> Vector6<f64>,
+        rigid_body_forces: impl Fn(&Vector6<f64>, &Vector6<f64>, usize) -> Vector6<f64>,
         eta: &SVector<f64, NUM_DOFS>,
     ) -> SVector<f64, NUM_DOFS> {
         let mut w: Vec<Vector6<f64>> = vec![Vector6::zeros(); NUM_BODIES];
         let mut zeta = SVector::<f64, NUM_DOFS>::zeros();
         let mut h = vec![Isometry3::<f64>::identity(); NUM_BODIES];
-        let mut g = vec![Isometry3::<f64>::identity(); NUM_BODIES];
         let mut alpha = vec![Vector6::<f64>::zeros(); NUM_BODIES];
         let mut nu = vec![Vector6::<f64>::zeros(); NUM_BODIES];
         let mut nu_prime = vec![Vector6::<f64>::zeros(); NUM_BODIES];
@@ -226,7 +225,6 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
             let sigma_prime_i = sigma_prime.rows(idx, self.joint_dims[i]);
 
             if lambda(i) < 0 {
-                g[i] = h[i];
                 nu[i] = Phi_i * mu_i;
                 nu_prime[i] = Phi_i * mu_prime_i;
 
@@ -243,8 +241,6 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
                     }
                 }
             } else {
-                g[i] = g[lambda(i) as usize] * h[i];
-
                 let Ad_h_inv = Ad(&h[i].inverse());
 
                 nu[i] = Ad_h_inv * nu[lambda(i) as usize] + Phi_i * mu_i;
@@ -265,9 +261,11 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
                     }
                 }
             }
+            let quat = UnitQuaternion::from_quaternion(*h[i].rotation.quaternion());
             w[i] = self.mass_matrices[i] * alpha[i]
                 - ad_se3(&nu_prime[i]).transpose() * self.mass_matrices[i] * nu[i]
                 - rigid_body_forces(&nu[i], &nu_prime[i], i)
+                - self.compute_hydrostatic_force(&quat, &Vector3::zeros(), i);
         }
 
         // backward step
@@ -361,7 +359,7 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
         &self,
         conf: &[Isometry3<f64>],
         mu: &SVector<f64, NUM_DOFS>,
-        damping_func: &dyn Fn(&Vector6<f64>, &Vector6<f64>, usize) -> Vector6<f64>,
+        damping_func: impl Fn(&Vector6<f64>, &Vector6<f64>, usize) -> Vector6<f64>,
         thruster_forces: &[Vector6<f64>],
         eta: &SVector<f64, NUM_DOFS>,
         lin_vel_current: &Vector3<f64>,
@@ -700,22 +698,30 @@ mod tests {
         // let M_2 = Matrix6::zeros();
 
         let mass_matrices = vec![M_1, M_2];
+        let inertia_mats = vec![I_1, I_2];
 
         // let joint_types = vec![JointType::SixDOF, JointType::Revolute];
         let joint_types = vec![JointType::Revolute, JointType::Revolute];
         let parent = vec![0, 1];
+        let mut masses = Vec::new();
+        masses.push(m_1);
+        masses.push(m_2);
+
+        let mut r_cg = vec![Vector3::<f64>::zeros(); 2];
+        r_cg[0] = r_cg1;
+        r_cg[1] = r_cg2;
 
         let mut multibody: MultiBody<2, 2> = MultiBody::new(
             offset_matrices,
-            Some(mass_matrices),
             None,
             None,
+            Some(inertia_mats),
             joint_types,
             parent,
             Vector3::new(0.0, 0.0, 9.81),
+            Some(r_cg),
             None,
-            None,
-            None,
+            Some(masses),
             None,
             None,
         )
@@ -775,9 +781,20 @@ mod tests {
 
         let r_cg1 = Vector3::new(l1 / 2.0, 0.0, 0.0);
         let r_cg2 = Vector3::new(l2 / 2.0, 0.0, 0.0);
+        let r_cg = vec![r_cg1, r_cg2, r_cg1, r_cg2, r_cg1, r_cg2, r_cg1, r_cg2, r_cg1];
 
         let m1 = PI * 0.09 * 0.09 * l1 * 1000.0;
         let m2 = PI * 0.09 * 0.09 * l2 * 1000.0;
+        let mut mass = vec![0.0; 9];
+        mass[0] = m1;
+        mass[1] = m2;
+        mass[2] = m1;
+        mass[3] = m2;
+        mass[4] = m1;
+        mass[5] = m2;
+        mass[6] = m1;
+        mass[7] = m2;
+        mass[8] = m1;
 
         let inertia_mat1 = Matrix3::new(
             1.0 / 2.0 * m1 * 0.09 * 0.09,
@@ -820,9 +837,9 @@ mod tests {
             joint_types,
             parent,
             Vector3::new(0.0, 0.0, 9.81),
+            Some(r_cg),
             None,
-            None,
-            None,
+            Some(mass),
             None,
             None,
         )
@@ -1146,7 +1163,6 @@ mod tests {
 
         let sigma_prime = SVector::<f64, 14>::zeros();
 
-    
 
         let c_vec = multibody.generalized_newton_euler(
             &conf,
