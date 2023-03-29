@@ -203,7 +203,7 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
         mu: &SVector<f64, NUM_DOFS>,
         mu_prime: &SVector<f64, NUM_DOFS>,
         sigma_prime: &SVector<f64, NUM_DOFS>,
-        rigid_body_forces: impl Fn(&Vector6<f64>, &Vector6<f64>, usize) -> Vector6<f64>,
+        rigid_body_forces: impl Fn(&[Vector6<f64>], &[Vector6<f64>]) -> SMatrix<f64, 6, NUM_BODIES>,
         eta: &SVector<f64, NUM_DOFS>,
     ) -> SVector<f64, NUM_DOFS> {
         let mut w: Vec<Vector6<f64>> = vec![Vector6::zeros(); NUM_BODIES];
@@ -264,15 +264,18 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
             let quat = UnitQuaternion::from_quaternion(*h[i].rotation.quaternion());
             w[i] = self.mass_matrices[i] * alpha[i]
                 - ad_se3(&nu_prime[i]).transpose() * self.mass_matrices[i] * nu[i]
-                - rigid_body_forces(&nu[i], &nu_prime[i], i)
                 - self.compute_hydrostatic_force(&quat, &Vector3::zeros(), i);
         }
+
+        let rigid_body_forces = rigid_body_forces(&nu, &nu_prime);
 
         // backward step
         for i in (0..NUM_BODIES).rev() {
             let idx = i + self.joint_size_offsets[i];
             let Phi_i = self.Phi.columns(idx, self.joint_dims[i]);
             let eta_i = eta.rows(idx, self.joint_dims[i]);
+
+            w[i] += rigid_body_forces.column(i);
 
             let temp = Phi_i.transpose() * w[i] - eta_i;
             zeta.rows_mut(idx, self.joint_dims[i]).copy_from(&temp);
@@ -359,7 +362,8 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
         &self,
         conf: &[Isometry3<f64>],
         mu: &SVector<f64, NUM_DOFS>,
-        damping_func: impl Fn(&Vector6<f64>, &Vector6<f64>, usize) -> Vector6<f64>,
+        // damping_func: impl Fn(&Vector6<f64>, &Vector6<f64>, usize) -> Vector6<f64>,
+        rigid_body_forces_func: impl Fn(&[Isometry3<f64>], &[Vector6<f64>]) -> SMatrix<f64, 6, NUM_BODIES>,
         thruster_forces: &[Vector6<f64>],
         eta: &SVector<f64, NUM_DOFS>,
         lin_vel_current: &Vector3<f64>,
@@ -402,10 +406,12 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
             }
             let quat = UnitQuaternion::from_quaternion(*h[i].rotation.quaternion());
             b[i] = -ad_se3(&nu[i]).transpose() * M_a[i] * nu[i]
-                - damping_func(&nu[i], &nu[i], i)
+                // - damping_func(&nu[i], &nu[i], i)
                 - self.compute_hydrostatic_force(&quat, lin_accel_current, i)
                 - thruster_forces[i];
         }
+
+        let rigid_body_forces = rigid_body_forces_func(&h, &nu);
 
         for i in (0..NUM_BODIES).rev() {
             let idx = i + self.joint_size_offsets[i];
@@ -413,6 +419,7 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
             let U_i = M_a[i] * Phi_i;
 
             let V_i = Phi_i.transpose() * &U_i;
+            b[i] += -rigid_body_forces.column(i);
 
             let u_i = eta.rows(idx, self.joint_dims[i]) - Phi_i.transpose() * b[i];
             let V_i_inv = V_i.try_inverse().unwrap();
@@ -740,7 +747,7 @@ mod tests {
         let eta = SVector::<f64, 2>::zeros();
         // let rigid_body_forces = vec![Vector6::<f64>::zeros(); 2];
         let rigid_body_forces_func =
-            &|x: &Vector6<f64>, y: &Vector6<f64>, i: usize| -> Vector6<f64> { 0.0 * x };
+            &|x: &[Vector6<f64>], y: &[Vector6<f64>]| -> SMatrix<f64, 6, 2> { SMatrix::<f64, 6, 2>::zeros()};
 
         let zeta = multibody.generalized_newton_euler(
             &conf,
@@ -870,7 +877,7 @@ mod tests {
         let eta = SVector::<f64, 14>::zeros();
         // let rigid_body_forces = vec![Vector6::<f64>::zeros(); 9];
         let rigid_body_forces_func =
-            &|x: &Vector6<f64>, y: &Vector6<f64>, i: usize| -> Vector6<f64> { 0.0 * x };
+            &|x: &[Vector6<f64>], y: &[Vector6<f64>]| -> SMatrix<f64, 6, 9> { SMatrix::<f64, 6, 9>::zeros()};
 
 
         let zeta = multibody.generalized_newton_euler(
@@ -1137,13 +1144,13 @@ mod tests {
 
         let mu = SVector::<f64, 14>::repeat(1.0);
 
-        let damping_func =
-            |x: &Vector6<f64>, y: &Vector6<f64>, i: usize| -> Vector6<f64> { 0.0 * x };
         // let damping_func = |x: &Vector6<f64>, i: usize| -> Box<dyn Fn(&Vector6<f64>) -> Vector6<f64> > {
         //     Box::new(0.0 * Vector6::<f64>::zeros())
         // };
-        let rigid_body_forces_func =
-            &|x: &Vector6<f64>, y: &Vector6<f64>, i: usize| -> Vector6<f64> { 0.0 * x };
+        let rigid_body_forces_func1 =
+            &|x: &[Vector6<f64>], y: &[Vector6<f64>]| -> SMatrix<f64, 6, 9> { SMatrix::<f64, 6, 9>::zeros()};
+        let rigid_body_forces_func2 =
+            &|x: &[Isometry3<f64>], y: &[Vector6<f64>]| -> SMatrix<f64, 6, 9> { SMatrix::<f64, 6, 9>::zeros()};
         // let lambda = |x: usize| -> i32 { self.parent[x] as i32 - 1 };
 
         let thruster_forces = vec![Vector6::<f64>::zeros(); 9];
@@ -1154,7 +1161,7 @@ mod tests {
         let accel = multibody.forward_dynamics_ab(
             &conf,
             &mu,
-            &damping_func,
+            rigid_body_forces_func2,
             &thruster_forces,
             &eta,
             &lin_vel_current,
@@ -1169,7 +1176,7 @@ mod tests {
             &mu,
             &mu,
             &sigma_prime,
-            rigid_body_forces_func,
+            rigid_body_forces_func1,
             &eta,
         );
 
@@ -1182,7 +1189,7 @@ mod tests {
         let accel3 = multibody.forward_dynamics_ab(
             &conf,
             &mu,
-            &damping_func,
+            rigid_body_forces_func2,
             &thruster_forces,
             &eta,
             &lin_vel_current,
