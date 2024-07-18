@@ -171,25 +171,25 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
 
         let mut conf: Vec<Isometry3<f64>> = vec![Isometry3::identity(); NUM_BODIES];
 
-        for i in 1..NUM_BODIES {
+        for (i, conf_i) in conf.iter_mut().enumerate().take(NUM_BODIES).skip(1) {
             match self.joint_types[i] {
                 JointType::Revolute => {
                     let mut temp = Isometry3::identity();
                     temp.rotation =
                         UnitQuaternion::from_axis_angle(&Vector3::z_axis(), scalar_joint_vars[j]);
 
-                    conf[i] = temp;
+                    *conf_i = temp;
                     j += 1;
                 }
                 JointType::Prismatic => {
                     let mut temp = Isometry3::identity();
                     temp.translation = Translation3::new(0.0, 0.0, scalar_joint_vars[j]);
 
-                    conf[i] = temp;
+                    *conf_i = temp;
                     j += 1;
                 }
                 JointType::SixDOF => {
-                    conf[i] = six_dof_vars[k];
+                    *conf_i = six_dof_vars[k];
                     k += 1;
                 }
             }
@@ -236,8 +236,7 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
                         alpha[i] = ad_se3(&nu_prime[i]) * Phi_i * mu_i
                             + Phi_i
                                 * (sigma_prime_i
-                                    + ad_se3(&mu_i.fixed_rows::<6>(0).try_into().unwrap())
-                                        * mu_prime_i);
+                                    + ad_se3(&mu_i.fixed_rows::<6>(0).into()) * mu_prime_i);
                     }
                 }
             } else {
@@ -248,15 +247,13 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
                 nu_prime[i] = Ad_h_inv * nu_prime[lambda(i) as usize] + Phi_i * mu_prime_i;
 
                 alpha[i] = Ad_h_inv * alpha[lambda(i) as usize]
-                            + ad_se3(&nu_prime[i]) * Phi_i * mu_i
-                            + Phi_i * sigma_prime_i;
+                    + ad_se3(&nu_prime[i]) * Phi_i * mu_i
+                    + Phi_i * sigma_prime_i;
 
                 alpha[i] += match self.joint_types[i] {
-                    JointType::Revolute | JointType::Prismatic => {
-                        Vector6::zeros()
-                    }
+                    JointType::Revolute | JointType::Prismatic => Vector6::zeros(),
                     JointType::SixDOF => {
-                        let mu_i = mu_i.fixed_rows::<6>(0).try_into().unwrap();
+                        let mu_i = mu_i.fixed_rows::<6>(0).into();
                         Phi_i * ad_se3(&mu_i) * mu_prime_i
                     }
                 }
@@ -363,7 +360,10 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
         conf: &[Isometry3<f64>],
         mu: &SVector<f64, NUM_DOFS>,
         // damping_func: impl Fn(&Vector6<f64>, &Vector6<f64>, usize) -> Vector6<f64>,
-        rigid_body_forces_func: impl Fn(&[Isometry3<f64>], &[Vector6<f64>]) -> SMatrix<f64, 6, NUM_BODIES>,
+        rigid_body_forces_func: impl Fn(
+            &[Isometry3<f64>],
+            &[Vector6<f64>],
+        ) -> SMatrix<f64, 6, NUM_BODIES>,
         thruster_forces: &[Vector6<f64>],
         eta: &SVector<f64, NUM_DOFS>,
         lin_vel_current: &Vector3<f64>,
@@ -747,7 +747,9 @@ mod tests {
         let eta = SVector::<f64, 2>::zeros();
         // let rigid_body_forces = vec![Vector6::<f64>::zeros(); 2];
         let rigid_body_forces_func =
-            &|x: &[Vector6<f64>], y: &[Vector6<f64>]| -> SMatrix<f64, 6, 2> { SMatrix::<f64, 6, 2>::zeros()};
+            &|x: &[Vector6<f64>], y: &[Vector6<f64>]| -> SMatrix<f64, 6, 2> {
+                SMatrix::<f64, 6, 2>::zeros()
+            };
 
         let zeta = multibody.generalized_newton_euler(
             &conf,
@@ -757,7 +759,6 @@ mod tests {
             rigid_body_forces_func,
             &eta,
         );
-
 
         println!("zeta: {}", zeta);
         // println!("zeta2: {}", zeta2);
@@ -788,7 +789,9 @@ mod tests {
 
         let r_cg1 = Vector3::new(l1 / 2.0, 0.0, 0.0);
         let r_cg2 = Vector3::new(l2 / 2.0, 0.0, 0.0);
-        let r_cg = vec![r_cg1, r_cg2, r_cg1, r_cg2, r_cg1, r_cg2, r_cg1, r_cg2, r_cg1];
+        let r_cg = vec![
+            r_cg1, r_cg2, r_cg1, r_cg2, r_cg1, r_cg2, r_cg1, r_cg2, r_cg1,
+        ];
 
         let m1 = PI * 0.09 * 0.09 * l1 * 1000.0;
         let m2 = PI * 0.09 * 0.09 * l2 * 1000.0;
@@ -877,8 +880,9 @@ mod tests {
         let eta = SVector::<f64, 14>::zeros();
         // let rigid_body_forces = vec![Vector6::<f64>::zeros(); 9];
         let rigid_body_forces_func =
-            &|x: &[Vector6<f64>], y: &[Vector6<f64>]| -> SMatrix<f64, 6, 9> { SMatrix::<f64, 6, 9>::zeros()};
-
+            &|x: &[Vector6<f64>], y: &[Vector6<f64>]| -> SMatrix<f64, 6, 9> {
+                SMatrix::<f64, 6, 9>::zeros()
+            };
 
         let zeta = multibody.generalized_newton_euler(
             &conf,
@@ -1148,9 +1152,13 @@ mod tests {
         //     Box::new(0.0 * Vector6::<f64>::zeros())
         // };
         let rigid_body_forces_func1 =
-            &|x: &[Vector6<f64>], y: &[Vector6<f64>]| -> SMatrix<f64, 6, 9> { SMatrix::<f64, 6, 9>::zeros()};
+            &|x: &[Vector6<f64>], y: &[Vector6<f64>]| -> SMatrix<f64, 6, 9> {
+                SMatrix::<f64, 6, 9>::zeros()
+            };
         let rigid_body_forces_func2 =
-            &|x: &[Isometry3<f64>], y: &[Vector6<f64>]| -> SMatrix<f64, 6, 9> { SMatrix::<f64, 6, 9>::zeros()};
+            &|x: &[Isometry3<f64>], y: &[Vector6<f64>]| -> SMatrix<f64, 6, 9> {
+                SMatrix::<f64, 6, 9>::zeros()
+            };
         // let lambda = |x: usize| -> i32 { self.parent[x] as i32 - 1 };
 
         let thruster_forces = vec![Vector6::<f64>::zeros(); 9];
@@ -1170,7 +1178,6 @@ mod tests {
 
         let sigma_prime = SVector::<f64, 14>::zeros();
 
-
         let c_vec = multibody.generalized_newton_euler(
             &conf,
             &mu,
@@ -1183,7 +1190,6 @@ mod tests {
         let mass_mat = multibody.compute_mass_matrix(&conf);
 
         let accel2 = -mass_mat.try_inverse().unwrap() * c_vec;
-
 
         let lin_vel_current = Vector3::new(10.0, 20.0, 30.0);
         let accel3 = multibody.forward_dynamics_ab(
@@ -1199,6 +1205,5 @@ mod tests {
         println!("accel: {}", accel);
         println!("accel2: {}", accel2);
         assert_relative_eq!(accel, accel2, epsilon = 1e-7);
-
     }
 }
