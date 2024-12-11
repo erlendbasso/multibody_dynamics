@@ -1,9 +1,3 @@
-// #![no_std]
-#![cfg_attr(feature = "no_std", no_std)]
-
-#[cfg(feature = "no_std")]
-extern crate core as std;
-
 extern crate nalgebra as na;
 use crate::math_functions::*;
 use na::{
@@ -14,9 +8,16 @@ use na::{
 // use num::{One, Zero};
 
 #[derive(Clone, Debug)]
+pub enum Axis {
+    X,
+    Y,
+    Z,
+}
+
+#[derive(Clone, Debug)]
 pub enum JointType {
-    Revolute,
-    Prismatic,
+    Revolute(Axis),
+    Prismatic(Axis),
     SixDOF,
 }
 
@@ -77,15 +78,23 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
         for i in 0..NUM_BODIES {
             joint_offset_vec[i] = joint_size_offsets;
 
-            match joint_types[i] {
-                JointType::Revolute => {
-                    let Phi_i = Vector6::new(0.0, 0.0, 0.0, 0.0, 0.0, 1.0);
+            match &joint_types[i] {
+                JointType::Revolute(axis) => {
+                    let Phi_i = match axis {
+                        Axis::X => Vector6::new(0.0, 0.0, 0.0, 1.0, 0.0, 0.0),
+                        Axis::Y => Vector6::new(0.0, 0.0, 0.0, 0.0, 1.0, 0.0),
+                        Axis::Z => Vector6::new(0.0, 0.0, 0.0, 0.0, 0.0, 1.0),
+                    };
                     Phi.fixed_view_mut::<6, 1>(0, i + joint_size_offsets)
                         .copy_from(&Phi_i);
                     joint_dims[i] = 1;
                 }
-                JointType::Prismatic => {
-                    let Phi_i = Vector6::new(0.0, 0.0, 1.0, 0.0, 0.0, 0.0);
+                JointType::Prismatic(axis) => {
+                    let Phi_i = match axis {
+                        Axis::X => Vector6::new(1.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+                        Axis::Y => Vector6::new(0.0, 1.0, 0.0, 0.0, 0.0, 0.0),
+                        Axis::Z => Vector6::new(0.0, 0.0, 1.0, 0.0, 0.0, 0.0),
+                    };
                     Phi.fixed_view_mut::<6, 1>(0, i + joint_size_offsets)
                         .copy_from(&Phi_i);
                     joint_dims[i] = 1;
@@ -172,18 +181,34 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
         let mut conf: Vec<Isometry3<f64>> = vec![Isometry3::identity(); NUM_BODIES];
 
         for (i, conf_i) in conf.iter_mut().enumerate().take(NUM_BODIES).skip(1) {
-            match self.joint_types[i] {
-                JointType::Revolute => {
+            match &self.joint_types[i] {
+                JointType::Revolute(axis) => {
                     let mut temp = Isometry3::identity();
-                    temp.rotation =
-                        UnitQuaternion::from_axis_angle(&Vector3::z_axis(), scalar_joint_vars[j]);
+                    temp.rotation = match axis {
+                        Axis::X => UnitQuaternion::from_axis_angle(
+                            &Vector3::x_axis(),
+                            scalar_joint_vars[j],
+                        ),
+                        Axis::Y => UnitQuaternion::from_axis_angle(
+                            &Vector3::y_axis(),
+                            scalar_joint_vars[j],
+                        ),
+                        Axis::Z => UnitQuaternion::from_axis_angle(
+                            &Vector3::z_axis(),
+                            scalar_joint_vars[j],
+                        ),
+                    };
 
                     *conf_i = temp;
                     j += 1;
                 }
-                JointType::Prismatic => {
+                JointType::Prismatic(axis) => {
                     let mut temp = Isometry3::identity();
-                    temp.translation = Translation3::new(0.0, 0.0, scalar_joint_vars[j]);
+                    temp.translation = match axis {
+                        Axis::X => Translation3::new(scalar_joint_vars[j], 0.0, 0.0),
+                        Axis::Y => Translation3::new(0.0, scalar_joint_vars[j], 0.0),
+                        Axis::Z => Translation3::new(0.0, 0.0, scalar_joint_vars[j]),
+                    };
 
                     *conf_i = temp;
                     j += 1;
@@ -229,7 +254,7 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
                 nu_prime[i] = Phi_i * mu_prime_i;
 
                 match self.joint_types[i] {
-                    JointType::Revolute | JointType::Prismatic => {
+                    JointType::Revolute(_) | JointType::Prismatic(_) => {
                         alpha[i] = ad_se3(&nu_prime[i]) * Phi_i * mu_i + Phi_i * sigma_prime_i;
                     }
                     JointType::SixDOF => {
@@ -247,11 +272,13 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
                 nu_prime[i] = Ad_h_inv * nu_prime[lambda(i) as usize] + Phi_i * mu_prime_i;
 
                 alpha[i] = Ad_h_inv * alpha[lambda(i) as usize]
-                    + ad_se3(&nu_prime[i]) * Phi_i * mu_i
-                    + Phi_i * sigma_prime_i;
+                    + Phi_i * sigma_prime_i
+                    + 0.5 * ad_se3(&(Phi_i * mu_i)) * Phi_i * mu_prime_i
+                    - 0.5 * ad_se3(&(Phi_i * mu_i)) * nu_prime[i]
+                    + 0.5 * ad_se3(&nu[i]) * Phi_i * mu_prime_i;
 
                 alpha[i] += match self.joint_types[i] {
-                    JointType::Revolute | JointType::Prismatic => Vector6::zeros(),
+                    JointType::Revolute(_) | JointType::Prismatic(_) => Vector6::zeros(),
                     JointType::SixDOF => {
                         let mu_i = mu_i.fixed_rows::<6>(0).into();
                         Phi_i * ad_se3(&mu_i) * mu_prime_i
@@ -260,7 +287,8 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
             }
             let quat = UnitQuaternion::from_quaternion(*h[i].rotation.quaternion());
             w[i] = self.mass_matrices[i] * alpha[i]
-                - ad_se3(&nu_prime[i]).transpose() * self.mass_matrices[i] * nu[i]
+                - 1.0 / 2.0 * ad_se3(&nu[i]).transpose() * self.mass_matrices[i] * nu_prime[i]
+                - 1.0 / 2.0 * ad_se3(&nu_prime[i]).transpose() * self.mass_matrices[i] * nu[i]
                 - self.compute_hydrostatic_force(&quat, &Vector3::zeros(), i);
         }
 
@@ -306,7 +334,7 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
             let idx = i + self.joint_size_offsets[i];
 
             let Phi_i: OMatrix<f64, U6, Dyn> = match self.joint_types[i] {
-                JointType::Revolute | JointType::Prismatic => {
+                JointType::Revolute(_) | JointType::Prismatic(_) => {
                     OMatrix::from_columns(&[self.Phi.fixed_view::<6, 1>(0, idx)])
                 }
                 JointType::SixDOF => OMatrix::<f64, U6, Dyn>::from_iterator(
@@ -326,9 +354,11 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
                 j = lambda(j) as usize;
 
                 let Phi_j: OMatrix<f64, U6, Dyn> = match self.joint_types[j] {
-                    JointType::Revolute | JointType::Prismatic => OMatrix::from_columns(&[self
-                        .Phi
-                        .fixed_view::<6, 1>(0, j + self.joint_size_offsets[j])]),
+                    JointType::Revolute(_) | JointType::Prismatic(_) => {
+                        OMatrix::from_columns(&[self
+                            .Phi
+                            .fixed_view::<6, 1>(0, j + self.joint_size_offsets[j])])
+                    }
                     JointType::SixDOF => OMatrix::<f64, U6, Dyn>::from_iterator(
                         6,
                         self.Phi
@@ -708,7 +738,7 @@ mod tests {
         let inertia_mats = vec![I_1, I_2];
 
         // let joint_types = vec![JointType::SixDOF, JointType::Revolute];
-        let joint_types = vec![JointType::Revolute, JointType::Revolute];
+        let joint_types = vec![JointType::Revolute(Axis::Z), JointType::Revolute(Axis::Z)];
         let parent = vec![0, 1];
         let mut masses = Vec::new();
         masses.push(m_1);
@@ -783,7 +813,7 @@ mod tests {
         let offset_matrices = vec![c1, c2, c3, c4, c3, c4, c3, c4, c3];
         // let offset_matrices = vec![c1, c2, c4, c3, c4, c3, c4, c3, c4];
 
-        let mut joint_types = vec![JointType::Revolute; 9];
+        let mut joint_types = vec![JointType::Revolute(Axis::Z); 9];
         joint_types[0] = JointType::SixDOF;
         let parent: Vec<u16> = vec![0, 1, 2, 3, 4, 5, 6, 7, 8];
 
@@ -919,7 +949,7 @@ mod tests {
         let offset_matrices = vec![c1, c2, c3, c4, c3, c4, c3, c4, c3];
         // let offset_matrices = vec![c1, c2, c4, c3, c4, c3, c4, c3, c4];
 
-        let mut joint_types = vec![JointType::Revolute; 9];
+        let mut joint_types = vec![JointType::Revolute(Axis::Z); 9];
         joint_types[0] = JointType::SixDOF;
         let parent: Vec<u16> = vec![0, 1, 2, 3, 4, 5, 6, 7, 8];
 
@@ -1065,7 +1095,7 @@ mod tests {
         let offset_matrices = vec![c1, c2, c3, c4, c3, c4, c3, c4, c3];
         // let offset_matrices = vec![c1, c2, c4, c3, c4, c3, c4, c3, c4];
 
-        let mut joint_types = vec![JointType::Revolute; 9];
+        let mut joint_types = vec![JointType::Revolute(Axis::Z); 9];
         joint_types[0] = JointType::SixDOF;
         let parent: Vec<u16> = vec![0, 1, 2, 3, 4, 5, 6, 7, 8];
 
