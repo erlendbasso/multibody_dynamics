@@ -534,6 +534,19 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
         hydrostatic_force
     }
 
+    pub fn compute_body_configurations(&self, config: &[Isometry3<f64>]) -> Vec<Isometry3<f64>> {
+        let mut g = vec![Isometry3::<f64>::identity(); NUM_BODIES];
+        let lambda = |x: usize| -> i32 { self.parent[x] as i32 - 1 };
+
+        for i in 0..NUM_BODIES {
+            g[i] = self.offset_matrices[i] * config[i];
+            if lambda(i) >= 0 {
+                g[i] = g[lambda(i) as usize] * g[i];
+            }
+        }
+        g
+    }
+
     pub fn compute_jacobians(&self, config: &[Isometry3<f64>]) -> Vec<SMatrix<f64, 6, NUM_DOFS>> {
         let mut jacs = vec![SMatrix::<f64, 6, NUM_DOFS>::zeros(); NUM_BODIES];
         let mut h = vec![Isometry3::<f64>::identity(); NUM_BODIES];
