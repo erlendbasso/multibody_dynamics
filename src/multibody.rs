@@ -22,17 +22,17 @@ pub enum JointType {
 }
 
 /// Allows overloading of functions for both a single 6DOF configuration and for a vector of 6DOF configurations, which is required when there are more than one 6DOF joint in the multibody system.
-pub trait IntoHomogenousConfigurationVec {
+pub trait IntoHomogeneousConfigurationVec {
     fn into(&self) -> Vec<Isometry3<f64>>;
 }
 
-impl IntoHomogenousConfigurationVec for Isometry3<f64> {
+impl IntoHomogeneousConfigurationVec for Isometry3<f64> {
     fn into(&self) -> Vec<Isometry3<f64>> {
         vec![*self]
     }
 }
 
-impl IntoHomogenousConfigurationVec for Vec<Isometry3<f64>> {
+impl IntoHomogeneousConfigurationVec for Vec<Isometry3<f64>> {
     fn into(&self) -> Vec<Isometry3<f64>> {
         self.clone()
     }
@@ -166,13 +166,13 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
     }
 
     /// Converts a set of minimal coordinates to a set of homogenous coordinates.
-    pub fn minimal_to_homogenous_configuration<Configuration, const D: usize>(
+    pub fn minimal_to_homogeneous_configuration<Configuration, const D: usize>(
         &self,
         six_dof_vars: &Configuration,
         scalar_joint_vars: &SVector<f64, D>,
     ) -> Vec<Isometry3<f64>>
     where
-        Configuration: IntoHomogenousConfigurationVec,
+        Configuration: IntoHomogeneousConfigurationVec,
     {
         let six_dof_vars = six_dof_vars.into();
         let mut j = 0;
@@ -180,7 +180,7 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
 
         let mut conf: Vec<Isometry3<f64>> = vec![Isometry3::identity(); NUM_BODIES];
 
-        for (i, conf_i) in conf.iter_mut().enumerate().take(NUM_BODIES).skip(1) {
+        for (i, conf_i) in conf.iter_mut().enumerate().take(NUM_BODIES) {
             match &self.joint_types[i] {
                 JointType::Revolute(axis) => {
                     let mut temp = Isometry3::identity();
@@ -711,7 +711,7 @@ mod tests {
             .copy_from(&(m * skew(&r)));
         mass_matrix
             .fixed_view_mut::<3, 3>(3, 3)
-            .copy_from(&inertia_mat);
+            .copy_from(inertia_mat);
         mass_matrix
     }
 
@@ -906,8 +906,8 @@ mod tests {
         // let joint_angles = SVector::<f64, 8>::zeros();
         let joint_angles = SVector::<f64, 8>::from_vec(vec![1.0; 8]);
 
-        let conf =
-            multibody.minimal_to_homogenous_configuration(&vec![configuration_base], &joint_angles);
+        let conf = multibody
+            .minimal_to_homogeneous_configuration(&vec![configuration_base], &joint_angles);
 
         // let mu = SVector::<f64, 14>::zeros();
         let mu = SVector::<f64, 14>::repeat(1.0);
@@ -1037,9 +1037,9 @@ mod tests {
             PI / 2.5,
         ]);
 
-        // let conf = multibody.minimal_to_homogenous_configuration(&vec![configuration_base], &joint_angles);
+        // let conf = multibody.minimal_to_homogeneous_configuration(&vec![configuration_base], &joint_angles);
         let conf =
-            multibody.minimal_to_homogenous_configuration(&configuration_base, &joint_angles);
+            multibody.minimal_to_homogeneous_configuration(&configuration_base, &joint_angles);
 
         let jacs = multibody.compute_jacobians(&conf);
         let mu = SVector::<f64, 14>::repeat(1.0);
@@ -1143,7 +1143,6 @@ mod tests {
         ) - m2 * skew(&r_cg2) * skew(&r_cg2);
 
         let mut M_1 = comp_mass_matrix(m1, &r_cg1, &inertia_mat1);
-        M_1[(0, 0)] = 10.0;
         let M_2 = comp_mass_matrix(m2, &r_cg2, &inertia_mat2);
 
         let mass_matrices = vec![M_1, M_2, M_1, M_2, M_1, M_2, M_1, M_2, M_1];
@@ -1186,8 +1185,9 @@ mod tests {
             PI / 2.5,
         ]);
 
+        // let conf = multibody.minimal_to_homogeneous_configuration(&vec![configuration_base], &joint_angles);
         let conf =
-            multibody.minimal_to_homogenous_configuration(&configuration_base, &joint_angles);
+            multibody.minimal_to_homogeneous_configuration(&configuration_base, &joint_angles);
 
         let mu = SVector::<f64, 14>::repeat(1.0);
 
