@@ -38,22 +38,25 @@ pub type BodyRegressorFn<const NUM_PARAMS: usize> = dyn Fn(
     &Vector6<f64>,   // alpha_bar
 ) -> SMatrix<f64, 6, NUM_PARAMS>;
 
-/// Callback type for a per-joint regressor (additional joint effects).
-///
-/// Arguments:
-/// - joint_pose_local: parent→joint_i transform (local joint configuration), i.e. conf[i].
-/// - nu: body velocity, expressed in the body frame.
-/// - nu_bar: desired body velocity, expressed in the body frame.
-/// - alpha_bar: body acceleration, expressed in the body frame.
-///
-/// Returns:
-/// - 6×NUM_PARAMS regressor contribution expressed in the body i frame.
+#[derive(Clone, Debug)]
+pub enum JointKinArg {
+    Scalar(f64),
+    SixDOF(Vector6<f64>),
+}
+
+/// Return type for joint regressors: 1xP for scalar joints or 6xP for 6-DoF joints.
+#[derive(Clone, Debug)]
+pub enum JointRegressorOut<const NUM_PARAMS: usize> {
+    Row(SMatrix<f64, 1, NUM_PARAMS>),
+    Matrix(SMatrix<f64, 6, NUM_PARAMS>),
+}
+
 pub type JointRegressorFn<const NUM_PARAMS: usize> = dyn Fn(
     &Isometry3<f64>, // joint_pose_local = conf[i]
-    &Vector6<f64>,   // nu
-    &Vector6<f64>,   // nu_bar
-    &Vector6<f64>,   // alpha_bar
-) -> SMatrix<f64, 6, NUM_PARAMS>;
+    JointKinArg,     // mu
+    JointKinArg,     // mu_bar
+    JointKinArg,     // sigma_bar
+) -> JointRegressorOut<NUM_PARAMS>;
 
 /// Allows overloading of functions for both a single 6DOF configuration and for a vector of 6DOF configurations, which is required when there are more than one 6DOF joint in the multibody system.
 pub trait IntoHomogeneousConfigurationVec {
@@ -845,8 +848,8 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
         joint_regressors: [&JointRegressorFn<NUM_PARAMS>; NUM_BODIES],
         conf: &[Isometry3<f64>],
         mu: &SVector<f64, NUM_DOFS>,
-        mu_prime: &SVector<f64, NUM_DOFS>,
-        sigma_prime: &SVector<f64, NUM_DOFS>,
+        mu_bar: &SVector<f64, NUM_DOFS>,
+        sigma_bar: &SVector<f64, NUM_DOFS>,
     ) -> SMatrix<f64, NUM_DOFS, NUM_PARAMS> {
         let mut regressor = SMatrix::<f64, NUM_DOFS, NUM_PARAMS>::zeros();
         // Compute the regressor matrix
@@ -870,12 +873,12 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
 
             let Phi_i = self.Phi.columns(idx, self.joint_dims[i]);
             let mu_i = mu.rows(idx, self.joint_dims[i]);
-            let mu_prime_i = mu_prime.rows(idx, self.joint_dims[i]);
-            let sigma_prime_i = sigma_prime.rows(idx, self.joint_dims[i]);
+            let mu_bar_i = mu_bar.rows(idx, self.joint_dims[i]);
+            let sigma_bar_i = sigma_bar.rows(idx, self.joint_dims[i]);
             // Cache repeated products
             // Joint spatial velocity and acceleration in body i coordinates.
             let v_i = Phi_i * mu_i;
-            let vdot_i = Phi_i * mu_prime_i;
+            let vdot_i = Phi_i * mu_bar_i;
             let ad_v_i = ad_se3(&v_i);
             let ad_vdot_i = ad_se3(&vdot_i);
 
@@ -883,13 +886,11 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
                 nu[i] = v_i; // v_i is Copy (SVector)
                 nu_bar[i] = vdot_i; // vdot_i is Copy
 
-                alpha_bar[i] = ad_vdot_i * v_i + Phi_i * sigma_prime_i;
+                alpha_bar[i] = ad_vdot_i * v_i + Phi_i * sigma_bar_i;
 
                 alpha_bar[i] += match self.joint_types[i] {
                     JointType::Revolute(_) | JointType::Prismatic(_) => Vector6::zeros(),
-                    JointType::SixDOF => {
-                        Phi_i * ad_se3(&mu_i.fixed_rows::<6>(0).into()) * mu_prime_i
-                    }
+                    JointType::SixDOF => Phi_i * ad_se3(&mu_i.fixed_rows::<6>(0).into()) * mu_bar_i,
                 }
             } else {
                 let Ad_h_inv = Ad_h_inv_cache[i];
@@ -899,7 +900,7 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
 
                 // Reuse cached ad_v_i and ad_vdot_i, avoid recomputing Phi_i * mu_i
                 alpha_bar[i] = Ad_h_inv * alpha_bar[lambda(i) as usize]
-                    + Phi_i * sigma_prime_i
+                    + Phi_i * sigma_bar_i
                     + 0.5 * ad_v_i * vdot_i
                     - 0.5 * ad_v_i * nu_bar[i]
                     + 0.5 * ad_se3(&nu[i]) * vdot_i;
@@ -908,7 +909,7 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
                     JointType::Revolute(_) | JointType::Prismatic(_) => Vector6::zeros(),
                     JointType::SixDOF => {
                         let mu_i = mu_i.fixed_rows::<6>(0).into();
-                        Phi_i * ad_se3(&mu_i) * mu_prime_i
+                        Phi_i * ad_se3(&mu_i) * mu_bar_i
                     }
                 };
             }
@@ -919,8 +920,40 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
         for i in (0..NUM_BODIES).rev() {
             let idx = i + self.joint_size_offsets[i];
             let Phi_i = self.Phi.columns(idx, self.joint_dims[i]);
-            let regressor_i = Phi_i.transpose() * W[i]
-                + joint_regressors[i](&conf[i], &nu[i], &nu_bar[i], &alpha_bar[i]);
+            let mut regressor_i = Phi_i.transpose() * W[i];
+
+            match self.joint_types[i] {
+                JointType::Revolute(_) | JointType::Prismatic(_) => {
+                    let jr = joint_regressors[i](
+                        &conf[i],
+                        JointKinArg::Scalar(mu[idx]),
+                        JointKinArg::Scalar(mu_bar[idx]),
+                        JointKinArg::Scalar(sigma_bar[idx]),
+                    );
+                    if let JointRegressorOut::Row(row) = jr {
+                        regressor_i += row;
+                    } else {
+                        debug_assert!(false, "Joint {} expected Row(1xP) regressor output", i);
+                    }
+                }
+                JointType::SixDOF => {
+                    let mu6 = Vector6::from_column_slice(mu.rows(idx, 6).as_slice());
+                    let mu_bar6 = Vector6::from_column_slice(mu_bar.rows(idx, 6).as_slice());
+                    let sigma_bar6 = Vector6::from_column_slice(sigma_bar.rows(idx, 6).as_slice());
+                    let jr = joint_regressors[i](
+                        &conf[i],
+                        JointKinArg::SixDOF(mu6),
+                        JointKinArg::SixDOF(mu_bar6),
+                        JointKinArg::SixDOF(sigma_bar6),
+                    );
+                    if let JointRegressorOut::Matrix(matrix) = jr {
+                        regressor_i += matrix; // 6xP
+                    } else {
+                        debug_assert!(false, "Joint {} expected Matrix(6xP) regressor output", i);
+                    }
+                }
+            }
+
             regressor
                 .rows_mut(idx, self.joint_dims[i])
                 .copy_from(&regressor_i);
