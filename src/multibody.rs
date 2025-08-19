@@ -984,7 +984,7 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
     }
 
     /// Computes the regressor matrix for the multibody system. The function takes in body regressors in each link frame, as well as joint_regressors.
-    pub fn compute_regressor_matrix<const NUM_PARAMS: usize, F>(
+    pub fn compute_regressor_matrix<const NUM_PARAMS: usize>(
         &self,
         body_regressors: [&BodyRegressorFn<NUM_PARAMS>; NUM_BODIES],
         joint_regressors: [&JointRegressorFn<NUM_PARAMS>; NUM_BODIES],
