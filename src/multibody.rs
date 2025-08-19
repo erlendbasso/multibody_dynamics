@@ -65,8 +65,8 @@ impl Default for Environment {
 #[derive(Clone, Debug)]
 pub struct MultiBodyConfig<const NUM_BODIES: usize, const NUM_DOFS: usize> {
     pub topology: Topology,
-    /// Per-link properties (length must equal NUM_BODIES)
-    pub link_props: Vec<LinkProperties>,
+    /// Optional per-link properties; defaults to zeroed properties when None
+    pub link_props: Option<Vec<LinkProperties>>,
     pub env: Environment,
 }
 
@@ -213,6 +213,7 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> TryFrom<MultiBodyConfig<NUM
             }
         }
 
+        let link_props = link_props.unwrap_or_else(|| vec![LinkProperties::default(); NUM_BODIES]);
         if link_props.len() != nb {
             return Err("link_props length mismatch");
         }
@@ -355,7 +356,7 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
         };
         let cfg = MultiBodyConfig::<NUM_BODIES, NUM_DOFS> {
             topology,
-            link_props,
+            link_props: Some(link_props),
             env,
         };
         MultiBody::<NUM_BODIES, NUM_DOFS>::try_from(cfg)
