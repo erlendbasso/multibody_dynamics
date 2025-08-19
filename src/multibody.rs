@@ -21,6 +21,65 @@ pub enum JointType {
     SixDOF,
 }
 
+/// System topology: kinematics-only data
+#[derive(Clone, Debug)]
+pub struct Topology {
+    pub offset_matrices: Vec<Isometry3<f64>>, // h_i offset transforms
+    pub joint_types: Vec<JointType>,
+    pub parent: Vec<u16>,
+}
+
+/// How body mass matrices are specified
+#[derive(Clone, Debug)]
+pub enum MassSpec {
+    /// Full 6x6 mass matrices for each body
+    Full6(Vec<Matrix6<f64>>),
+    /// Decomposed properties used to build 6x6 matrices; optional added mass per body
+    Decomposed {
+        mass: Vec<f64>,
+        r_com: Vec<Vector3<f64>>,
+        inertia_matrices: Vec<Matrix3<f64>>,
+        added_mass: Option<Vec<Matrix6<f64>>>,
+    },
+}
+
+/// Hydrostatic parameters
+#[derive(Clone, Debug)]
+pub struct HydroSpec {
+    pub volume: Vec<f64>,
+    pub rho: f64,
+    pub r_cob: Option<Vec<Vector3<f64>>>,
+}
+
+/// Environment parameters
+#[derive(Clone, Debug)]
+pub struct Environment {
+    pub gravity: Vector3<f64>,
+}
+
+impl Default for Environment {
+    fn default() -> Self {
+        Environment {
+            gravity: Vector3::zeros(),
+        }
+    }
+}
+
+/// All inputs needed to construct a MultiBody in a single object
+#[derive(Clone, Debug)]
+pub struct MultiBodyConfig<const NUM_BODIES: usize, const NUM_DOFS: usize> {
+    pub topology: Topology,
+    pub dynamics: MassSpec,
+    /// Optional hydrostatic parameters
+    pub hydro: Option<HydroSpec>,
+    pub env: Environment,
+    /// Optional scalar mass properties used by hydro even when using Full6 dynamics
+    pub mass: Option<Vec<f64>>, // copied into MultiBody.mass
+    pub r_com: Option<Vec<Vector3<f64>>>, // copied into MultiBody.r_com
+}
+
+// Intentionally no builder: prefer a single config parameter for simplicity
+
 /// Callback type for a per-body regressor W_i.
 ///
 /// Arguments:
@@ -94,23 +153,38 @@ pub struct MultiBody<const NUM_BODIES: usize, const NUM_DOFS: usize> {
 }
 
 // impl<T: na::RealField  + na::ClosedAdd + na::ClosedMul + na::ClosedDiv + Copy, const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<T, NUM_BODIES, NUM_DOFS> {
-impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_DOFS> {
-    pub fn new(
-        offset_matrices: Vec<Isometry3<f64>>,
-        mass_matrices: Option<Vec<Matrix6<f64>>>,
-        added_mass: Option<Vec<Matrix6<f64>>>,
-        inertia_matrices: Option<Vec<Matrix3<f64>>>,
-        joint_types: Vec<JointType>,
-        parent: Vec<u16>,
-        gravity: Vector3<f64>,
-        r_com: Option<Vec<Vector3<f64>>>,
-        r_cob: Option<Vec<Vector3<f64>>>,
-        mass: Option<Vec<f64>>,
-        volume: Option<Vec<f64>>,
-        rho: Option<f64>,
-    ) -> Result<MultiBody<NUM_BODIES, NUM_DOFS>, &'static str> {
-        // NOTE: Many parameters; consider refactoring to a builder (MultiBodyBuilder) to reduce
-        // clippy::too_many_arguments while preserving clarity. Kept for backward compatibility.
+impl<const NUM_BODIES: usize, const NUM_DOFS: usize> TryFrom<MultiBodyConfig<NUM_BODIES, NUM_DOFS>>
+    for MultiBody<NUM_BODIES, NUM_DOFS>
+{
+    type Error = &'static str;
+
+    fn try_from(cfg: MultiBodyConfig<NUM_BODIES, NUM_DOFS>) -> Result<Self, Self::Error> {
+        // Validate basic sizes
+        let nb = NUM_BODIES;
+        if cfg.topology.offset_matrices.len() != nb {
+            return Err("offset_matrices length mismatch");
+        }
+        if cfg.topology.joint_types.len() != nb {
+            return Err("joint_types length mismatch");
+        }
+        if cfg.topology.parent.len() != nb {
+            return Err("parent length mismatch");
+        }
+
+        let MultiBodyConfig {
+            topology,
+            dynamics,
+            hydro,
+            env,
+            mass,
+            r_com,
+        } = cfg;
+        let Topology {
+            offset_matrices,
+            joint_types,
+            parent,
+        } = topology;
+
         let mut joint_dims = SVector::<usize, NUM_BODIES>::zeros();
         let mut Phi = SMatrix::<f64, 6, NUM_DOFS>::zeros();
         let mut joint_size_offsets = 0;
@@ -150,42 +224,57 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
             }
         }
 
-        let mass_matrices = match mass_matrices {
-            Some(mass_matrices) => mass_matrices,
-            None => {
+        // Compute mass matrices and decide mass/r_com to store
+        let (mass_matrices, mass_opt, r_com_opt) = match dynamics {
+            MassSpec::Full6(mats) => (mats, mass, r_com),
+            MassSpec::Decomposed {
+                mass,
+                r_com,
+                inertia_matrices,
+                added_mass,
+            } => {
+                if mass.len() != nb {
+                    return Err("mass length mismatch");
+                }
+                if r_com.len() != nb {
+                    return Err("r_com length mismatch");
+                }
+                if inertia_matrices.len() != nb {
+                    return Err("inertia_matrices length mismatch");
+                }
+                if let Some(ref am) = added_mass {
+                    if am.len() != nb {
+                        return Err("added_mass length mismatch");
+                    }
+                }
+
                 let mut mass_mats = vec![Matrix6::zeros(); NUM_BODIES];
                 for i in 0..NUM_BODIES {
-                    let m = mass.as_ref().expect(
-                        "Scalar masses should be provided if the mass matrix is not given.",
-                    )[i];
-                    let r = r_com.as_ref().expect(
-                        "The center of gravity must be given if the mass matrix is not given.",
-                    )[i];
-                    let added_mass_i = match added_mass {
-                        Some(ref added_mass) => added_mass[i],
-                        None => Matrix6::zeros(),
-                    };
-                    let inertia_mat = inertia_matrices.as_ref().expect("The 3x3 inertia matrices must be provided if the 6x6 mass matrix is not given.")[i];
+                    let m_i = mass[i];
+                    let r_i = &r_com[i];
+                    let added_mass_i = added_mass
+                        .as_ref()
+                        .map(|v| v[i])
+                        .unwrap_or_else(Matrix6::zeros);
+                    let inertia_mat = inertia_matrices[i];
                     mass_mats[i] = ({
-                        let r = &r;
-                        let inertia_mat = &inertia_mat;
                         let mut mass_matrix = Matrix6::zeros();
                         mass_matrix
                             .fixed_view_mut::<3, 3>(0, 0)
-                            .copy_from(&(m * Matrix3::identity()));
+                            .copy_from(&(m_i * Matrix3::identity()));
                         mass_matrix
                             .fixed_view_mut::<3, 3>(0, 3)
-                            .copy_from(&(-m * skew(r)));
+                            .copy_from(&(-m_i * skew(r_i)));
                         mass_matrix
                             .fixed_view_mut::<3, 3>(3, 0)
-                            .copy_from(&(m * skew(r)));
+                            .copy_from(&(m_i * skew(r_i)));
                         mass_matrix
                             .fixed_view_mut::<3, 3>(3, 3)
-                            .copy_from(inertia_mat);
+                            .copy_from(&inertia_mat);
                         mass_matrix
                     }) + added_mass_i;
                 }
-                mass_mats
+                (mass_mats, Some(mass), Some(r_com))
             }
         };
 
@@ -202,6 +291,13 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
             }
             anc
         };
+        // Pull hydro fields out (optional)
+        let (volume, rho, r_cob) = if let Some(h) = hydro {
+            (Some(h.volume), Some(h.rho), h.r_cob)
+        } else {
+            (None, None, None)
+        };
+
         Ok(MultiBody {
             offset_matrices,
             mass_matrices,
@@ -211,13 +307,74 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
             Phi,
             joint_dims,
             joint_size_offsets: joint_offset_vec,
-            gravity,
-            r_com,
+            gravity: env.gravity,
+            r_com: r_com_opt,
+            mass: mass_opt,
             r_cob,
-            mass,
             volume,
             rho,
         })
+    }
+}
+
+impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_DOFS> {
+    /// Preferred constructor: provide a single configuration object
+    pub fn from_config(cfg: MultiBodyConfig<NUM_BODIES, NUM_DOFS>) -> Result<Self, &'static str> {
+        Self::try_from(cfg)
+    }
+    #[deprecated(note = "Use MultiBody::from_config(...) or TryFrom<MultiBodyConfig>")]
+    pub fn new(
+        offset_matrices: Vec<Isometry3<f64>>,
+        mass_matrices: Option<Vec<Matrix6<f64>>>,
+        added_mass: Option<Vec<Matrix6<f64>>>,
+        inertia_matrices: Option<Vec<Matrix3<f64>>>,
+        joint_types: Vec<JointType>,
+        parent: Vec<u16>,
+        gravity: Vector3<f64>,
+        r_com: Option<Vec<Vector3<f64>>>,
+        r_cob: Option<Vec<Vector3<f64>>>,
+        mass: Option<Vec<f64>>,
+        volume: Option<Vec<f64>>,
+        rho: Option<f64>,
+    ) -> Result<MultiBody<NUM_BODIES, NUM_DOFS>, &'static str> {
+        // Build config from legacy arguments and delegate
+        let topology = Topology {
+            offset_matrices,
+            joint_types,
+            parent,
+        };
+        let dynamics = match mass_matrices {
+            Some(mats) => MassSpec::Full6(mats),
+            None => MassSpec::Decomposed {
+                mass: mass
+                    .clone()
+                    .ok_or("mass required when mass_matrices not provided")?,
+                r_com: r_com
+                    .clone()
+                    .ok_or("r_com required when mass_matrices not provided")?,
+                inertia_matrices: inertia_matrices
+                    .ok_or("inertia_matrices required when mass_matrices not provided")?,
+                added_mass,
+            },
+        };
+        let hydro = match (volume, rho) {
+            (Some(v), Some(r)) => Some(HydroSpec {
+                volume: v,
+                rho: r,
+                r_cob,
+            }),
+            _ => None,
+        };
+        let env = Environment { gravity };
+        let cfg = MultiBodyConfig::<NUM_BODIES, NUM_DOFS> {
+            topology,
+            dynamics,
+            hydro,
+            env,
+            mass,
+            r_com,
+        };
+        MultiBody::<NUM_BODIES, NUM_DOFS>::try_from(cfg)
     }
 
     /// Converts a set of minimal coordinates to a set of homogenous coordinates.
