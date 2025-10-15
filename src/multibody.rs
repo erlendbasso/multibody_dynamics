@@ -82,12 +82,13 @@ pub struct MultiBodyConfig<const NUM_BODIES: usize, const NUM_DOFS: usize> {
 ///
 /// Returns:
 /// - 6×NUM_PARAMS regressor W_i expressed in the body i frame.
-pub type BodyRegressorFn<const NUM_PARAMS: usize> = dyn Fn(
-    &Isometry3<f64>, // pose_world = g_i
-    &Vector6<f64>,   // nu
-    &Vector6<f64>,   // nu_bar
-    &Vector6<f64>,   // alpha_bar
-) -> SMatrix<f64, 6, NUM_PARAMS>;
+pub type BodyRegressorFn<'a, const NUM_PARAMS: usize> = dyn Fn(
+        &Isometry3<f64>, // pose_world = g_i
+        &Vector6<f64>,   // nu
+        &Vector6<f64>,   // nu_bar
+        &Vector6<f64>,   // alpha_bar
+    ) -> SMatrix<f64, 6, NUM_PARAMS>
+    + 'a;
 
 #[derive(Clone, Debug)]
 pub enum JointKinArg {
@@ -102,12 +103,13 @@ pub enum JointRegressorOut<const NUM_PARAMS: usize> {
     Matrix(SMatrix<f64, 6, NUM_PARAMS>),
 }
 
-pub type JointRegressorFn<const NUM_PARAMS: usize> = dyn Fn(
-    &Isometry3<f64>, // joint_pose_local = conf[i]
-    JointKinArg,     // mu
-    JointKinArg,     // mu_bar
-    JointKinArg,     // sigma_bar
-) -> JointRegressorOut<NUM_PARAMS>;
+pub type JointRegressorFn<'a, const NUM_PARAMS: usize> = dyn Fn(
+        &Isometry3<f64>, // joint_pose_local = conf[i]
+        JointKinArg,     // mu
+        JointKinArg,     // mu_bar
+        JointKinArg,     // sigma_bar
+    ) -> JointRegressorOut<NUM_PARAMS>
+    + 'a;
 
 /// Allows overloading of functions for both a single 6DOF configuration and for a vector of 6DOF configurations, which is required when there are more than one 6DOF joint in the multibody system.
 pub trait IntoHomogeneousConfigurationVec {
@@ -984,10 +986,10 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
     }
 
     /// Computes the regressor matrix for the multibody system. The function takes in body regressors in each link frame, as well as joint_regressors.
-    pub fn compute_regressor_matrix<const NUM_PARAMS: usize>(
+    pub fn compute_regressor_matrix<'a, const NUM_PARAMS: usize>(
         &self,
-        body_regressors: [&BodyRegressorFn<NUM_PARAMS>; NUM_BODIES],
-        joint_regressors: [&JointRegressorFn<NUM_PARAMS>; NUM_BODIES],
+        body_regressors: [&'a BodyRegressorFn<'a, NUM_PARAMS>; NUM_BODIES],
+        joint_regressors: [&'a JointRegressorFn<'a, NUM_PARAMS>; NUM_BODIES],
         conf: &[Isometry3<f64>],
         mu: &SVector<f64, NUM_DOFS>,
         mu_bar: &SVector<f64, NUM_DOFS>,
