@@ -995,11 +995,14 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
         let lambda = |x: usize| -> i32 { self.parent[x] as i32 - 1 };
         // Optimized double loop: hoist ad_se3 computation per j and precompute product with jacs[j].
         for j in 1..NUM_BODIES {
-            // body 0 has no parent
+            let parent = lambda(j);
+            if parent < 0 {
+                continue;
+            }
             let Phi_q_mu_j = &phi_mu_cache[j];
             let ad_phi_mu_j = ad_se3(Phi_q_mu_j);
             let ad_phi_mu_j_jac_j = ad_phi_mu_j * jacs[j]; // 6 x NUM_DOFS
-            let parent = lambda(j) as usize;
+            let parent = parent as usize;
             // Iterate only true ancestors i of j
             for &i in &self.ancestors[j] {
                 let idx_i = i + self.joint_size_offsets[i];
