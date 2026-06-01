@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use multibody_dynamics::multibody::{Axis, JointType, MultiBody};
 use nalgebra::{Isometry3, Matrix3, SVector, Vector3, Vector6};

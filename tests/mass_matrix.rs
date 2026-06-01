@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 use approx::assert_relative_eq;
 use multibody_dynamics::math_functions::skew;
 use multibody_dynamics::multibody::*;
@@ -44,9 +46,9 @@ fn mass_matrix_symmetry_and_basic_values() {
     .unwrap();
 
     // Config with both revolute angles = 0
-    let base = na::Isometry3::identity();
     let joint_angles = na::SVector::<f64, 2>::zeros();
-    let conf = mb.minimal_to_homogeneous_configuration(&base, &joint_angles);
+    let six_dof_vars: Vec<na::Isometry3<f64>> = Vec::new();
+    let conf = mb.minimal_to_homogeneous_configuration(&six_dof_vars, &joint_angles);
     let m_mat = mb.compute_mass_matrix(&conf);
 
     // Symmetry

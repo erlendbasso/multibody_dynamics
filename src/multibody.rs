@@ -21,6 +21,24 @@ pub enum JointType {
     SixDOF,
 }
 
+fn joint_dim(joint_type: &JointType) -> usize {
+    match joint_type {
+        JointType::Revolute(_) | JointType::Prismatic(_) => 1,
+        JointType::SixDOF => 6,
+    }
+}
+
+fn mass_properties_from_mass6(mass6: &Matrix6<f64>) -> (f64, Vector3<f64>) {
+    let mass = mass6.fixed_view::<3, 3>(0, 0).trace() / 3.0;
+    let r_com = if mass.abs() > f64::EPSILON {
+        let skew_r = -mass6.fixed_view::<3, 3>(0, 3).into_owned() / mass;
+        Vector3::new(skew_r[(2, 1)], skew_r[(0, 2)], skew_r[(1, 0)])
+    } else {
+        Vector3::zeros()
+    };
+    (mass, r_com)
+}
+
 /// System topology: kinematics-only data
 #[derive(Clone, Debug)]
 pub struct Topology {
@@ -164,6 +182,22 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> TryFrom<MultiBodyConfig<NUM
         if cfg.topology.parent.len() != nb {
             return Err("parent length mismatch");
         }
+        for (i, parent_entry) in cfg.topology.parent.iter().enumerate() {
+            if *parent_entry == 0 {
+                continue;
+            }
+            let parent_idx = usize::from(*parent_entry - 1);
+            if parent_idx >= nb {
+                return Err("parent index out of range");
+            }
+            if parent_idx >= i {
+                return Err("parent must reference an earlier body");
+            }
+        }
+        let expected_dofs: usize = cfg.topology.joint_types.iter().map(joint_dim).sum();
+        if expected_dofs != NUM_DOFS {
+            return Err("NUM_DOFS must equal sum of joint dimensions");
+        }
 
         let MultiBodyConfig {
             topology,
@@ -229,6 +263,9 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> TryFrom<MultiBodyConfig<NUM
             let lp = &link_props[i];
             // base mass
             let mut mm = if let Some(m6) = lp.mass6 {
+                let (mass_from_m6, r_com_from_m6) = mass_properties_from_mass6(&m6);
+                mass_vec[i] = lp.mass.unwrap_or(mass_from_m6);
+                r_com_vec[i] = lp.r_com.unwrap_or(r_com_from_m6);
                 m6
             } else {
                 match (lp.mass, lp.r_com, lp.inertia3) {
@@ -250,7 +287,8 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> TryFrom<MultiBodyConfig<NUM
                             .copy_from(&inertia3);
                         mass_matrix
                     }
-                    _ => Matrix6::zeros(),
+                    (None, None, None) => Matrix6::zeros(),
+                    _ => return Err("mass, r_com, and inertia3 must all be provided together"),
                 }
             };
             if let Some(am) = lp.added_mass6 {
@@ -263,15 +301,6 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> TryFrom<MultiBodyConfig<NUM
             }
             if let Some(rcb) = lp.r_cob {
                 r_cob_vec[i] = rcb;
-            }
-            // If user provided mass6 but also gave scalar mass/r_com, keep them for hydro
-            if lp.mass6.is_some() {
-                if let Some(m) = lp.mass {
-                    mass_vec[i] = m;
-                }
-                if let Some(rc) = lp.r_com {
-                    r_com_vec[i] = rc;
-                }
             }
         }
 
@@ -318,6 +347,7 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
         Self::try_from(cfg)
     }
     #[deprecated(note = "Use MultiBody::from_config(...) or TryFrom<MultiBodyConfig>")]
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         offset_matrices: Vec<Isometry3<f64>>,
         mass_matrices: Option<Vec<Matrix6<f64>>>,
@@ -332,6 +362,41 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
         volume: Option<Vec<f64>>,
         rho: Option<f64>,
     ) -> Result<MultiBody<NUM_BODIES, NUM_DOFS>, &'static str> {
+        if let Some(values) = &mass_matrices {
+            if values.len() != NUM_BODIES {
+                return Err("mass_matrices length mismatch");
+            }
+        }
+        if let Some(values) = &added_mass {
+            if values.len() != NUM_BODIES {
+                return Err("added_mass length mismatch");
+            }
+        }
+        if let Some(values) = &inertia_matrices {
+            if values.len() != NUM_BODIES {
+                return Err("inertia_matrices length mismatch");
+            }
+        }
+        if let Some(values) = &r_com {
+            if values.len() != NUM_BODIES {
+                return Err("r_com length mismatch");
+            }
+        }
+        if let Some(values) = &r_cob {
+            if values.len() != NUM_BODIES {
+                return Err("r_cob length mismatch");
+            }
+        }
+        if let Some(values) = &mass {
+            if values.len() != NUM_BODIES {
+                return Err("mass length mismatch");
+            }
+        }
+        if let Some(values) = &volume {
+            if values.len() != NUM_BODIES {
+                return Err("volume length mismatch");
+            }
+        }
         // Build config from legacy arguments and delegate
         let topology = Topology {
             offset_matrices,
@@ -361,7 +426,9 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
             link_props: Some(link_props),
             env,
         };
-        MultiBody::<NUM_BODIES, NUM_DOFS>::try_from(cfg)
+        let mut multibody = MultiBody::<NUM_BODIES, NUM_DOFS>::try_from(cfg)?;
+        multibody.rho = rho;
+        Ok(multibody)
     }
 
     /// Converts a set of minimal coordinates to a set of homogenous coordinates.
@@ -373,7 +440,36 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
     where
         Configuration: IntoHomogeneousConfigurationVec,
     {
+        self.try_minimal_to_homogeneous_configuration(six_dof_vars, scalar_joint_vars)
+            .expect("configuration coordinate count does not match topology")
+    }
+
+    /// Checked variant of [`minimal_to_homogeneous_configuration`].
+    pub fn try_minimal_to_homogeneous_configuration<Configuration, const D: usize>(
+        &self,
+        six_dof_vars: &Configuration,
+        scalar_joint_vars: &SVector<f64, D>,
+    ) -> Result<Vec<Isometry3<f64>>, &'static str>
+    where
+        Configuration: IntoHomogeneousConfigurationVec,
+    {
         let six_dof_vars = six_dof_vars.into();
+        let expected_six_dof = self
+            .joint_types
+            .iter()
+            .filter(|joint_type| matches!(joint_type, JointType::SixDOF))
+            .count();
+        if six_dof_vars.len() != expected_six_dof {
+            return Err("six_dof_vars length mismatch");
+        }
+        let expected_scalar_dofs = self
+            .joint_types
+            .iter()
+            .filter(|joint_type| !matches!(joint_type, JointType::SixDOF))
+            .count();
+        if D != expected_scalar_dofs {
+            return Err("scalar_joint_vars length mismatch");
+        }
         let mut j = 0;
         let mut k = 0;
 
@@ -418,7 +514,7 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
                 }
             }
         }
-        conf
+        Ok(conf)
     }
 
     pub fn generalized_newton_euler(
@@ -603,6 +699,7 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
     }
 
     /// Computes the forward dynamics using the articulated body algorithm (AB).
+    #[allow(clippy::too_many_arguments)]
     pub fn forward_dynamics_ab(
         &self,
         conf: &[Isometry3<f64>],
@@ -995,6 +1092,27 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
         mu_bar: &SVector<f64, NUM_DOFS>,
         sigma_bar: &SVector<f64, NUM_DOFS>,
     ) -> SMatrix<f64, NUM_DOFS, NUM_PARAMS> {
+        self.try_compute_regressor_matrix(
+            body_regressors,
+            joint_regressors,
+            conf,
+            mu,
+            mu_bar,
+            sigma_bar,
+        )
+        .expect("joint regressor output shape does not match joint type")
+    }
+
+    /// Checked variant of [`compute_regressor_matrix`].
+    pub fn try_compute_regressor_matrix<'a, const NUM_PARAMS: usize>(
+        &self,
+        body_regressors: [&'a BodyRegressorFn<'a, NUM_PARAMS>; NUM_BODIES],
+        joint_regressors: [&'a JointRegressorFn<'a, NUM_PARAMS>; NUM_BODIES],
+        conf: &[Isometry3<f64>],
+        mu: &SVector<f64, NUM_DOFS>,
+        mu_bar: &SVector<f64, NUM_DOFS>,
+        sigma_bar: &SVector<f64, NUM_DOFS>,
+    ) -> Result<SMatrix<f64, NUM_DOFS, NUM_PARAMS>, &'static str> {
         let mut regressor = SMatrix::<f64, NUM_DOFS, NUM_PARAMS>::zeros();
         // Compute the regressor matrix
         let mut W: Vec<SMatrix<f64, 6, NUM_PARAMS>> =
@@ -1006,7 +1124,7 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
         // Cache Ad(h_i^{-1}) for reuse (avoids repeated inverse computations)
         let mut Ad_h_inv_cache = vec![Matrix6::zeros(); NUM_BODIES];
 
-        let g = self.compute_body_configurations(&conf);
+        let g = self.compute_body_configurations(conf);
 
         let lambda = |x: usize| -> i32 { self.parent[x] as i32 - 1 };
 
@@ -1077,7 +1195,7 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
                     if let JointRegressorOut::Row(row) = jr {
                         regressor_i += row;
                     } else {
-                        debug_assert!(false, "Joint {} expected Row(1xP) regressor output", i);
+                        return Err("scalar joint regressor returned Matrix");
                     }
                 }
                 JointType::SixDOF => {
@@ -1093,7 +1211,7 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
                     if let JointRegressorOut::Matrix(matrix) = jr {
                         regressor_i += matrix; // 6xP
                     } else {
-                        debug_assert!(false, "Joint {} expected Matrix(6xP) regressor output", i);
+                        return Err("six_dof joint regressor returned Row");
                     }
                 }
             }
@@ -1108,6 +1226,6 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
             }
         }
 
-        regressor
+        Ok(regressor)
     }
 }

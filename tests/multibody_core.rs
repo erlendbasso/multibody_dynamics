@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 use approx::assert_relative_eq;
 use core::f64::consts::PI;
 use multibody_dynamics::math_functions::skew;
@@ -17,10 +19,10 @@ fn comp_mass_matrix(m: f64, r: &Vector3, inertia_mat: &Matrix3) -> Matrix6 {
         .copy_from(&(m * Matrix3::identity()));
     mass_matrix
         .fixed_view_mut::<3, 3>(0, 3)
-        .copy_from(&(-m * skew(&r)));
+        .copy_from(&(-m * skew(r)));
     mass_matrix
         .fixed_view_mut::<3, 3>(3, 0)
-        .copy_from(&(m * skew(&r)));
+        .copy_from(&(m * skew(r)));
     mass_matrix
         .fixed_view_mut::<3, 3>(3, 3)
         .copy_from(inertia_mat);
@@ -72,12 +74,13 @@ fn gen_newton_euler_test() {
     )
     .unwrap();
 
-    let mut conf: Vec<na::Isometry3<f64>> = Vec::new();
-    conf.push(na::Isometry3::identity());
-    conf.push(na::Isometry3::from_parts(
-        Translation3::identity(),
-        na::UnitQuaternion::from_euler_angles(0.0, 0.0, PI / 2.0),
-    ));
+    let conf = vec![
+        na::Isometry3::identity(),
+        na::Isometry3::from_parts(
+            Translation3::identity(),
+            na::UnitQuaternion::from_euler_angles(0.0, 0.0, PI / 2.0),
+        ),
+    ];
 
     let mu = Vector2::new(0.0, 1.0);
     let sigma_prime = Vector2::new(0.0, 0.0);
@@ -113,7 +116,7 @@ fn jacobian_and_forward_dynamics_smoke() {
     let offset_matrices = vec![c1, c2, c3, c4, c3, c4, c3, c4, c3];
     let mut joint_types = vec![JointType::Revolute(Axis::Z); 9];
     joint_types[0] = JointType::SixDOF;
-    let parent: Vec<u16> = (0..9 as u16).collect();
+    let parent: Vec<u16> = (0..9_u16).collect();
     let r_cg1 = Vector3::new(l1 / 2.0, 0.0, 0.0);
     let r_cg2 = Vector3::new(l2 / 2.0, 0.0, 0.0);
     let m1 = PI * 0.09 * 0.09 * l1 * 1000.0;

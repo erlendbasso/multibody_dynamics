@@ -1,0 +1,215 @@
+#![allow(deprecated)]
+
+use approx::assert_relative_eq;
+use multibody_dynamics::math_functions::skew;
+use multibody_dynamics::multibody::*;
+use nalgebra as na;
+
+fn scalar_link(mass: f64) -> LinkProperties {
+    LinkProperties {
+        mass: Some(mass),
+        r_com: Some(na::Vector3::zeros()),
+        inertia3: Some(na::Matrix3::identity()),
+        ..LinkProperties::default()
+    }
+}
+
+fn simple_config<const NUM_BODIES: usize, const NUM_DOFS: usize>(
+    joint_types: Vec<JointType>,
+    parent: Vec<u16>,
+) -> MultiBodyConfig<NUM_BODIES, NUM_DOFS> {
+    MultiBodyConfig {
+        topology: Topology {
+            offset_matrices: vec![na::Isometry3::identity(); NUM_BODIES],
+            joint_types,
+            parent,
+        },
+        link_props: Some(vec![scalar_link(1.0); NUM_BODIES]),
+        env: Environment::default(),
+    }
+}
+
+#[test]
+fn rejects_wrong_dof_count_before_matrix_indexing() {
+    let cfg = simple_config::<1, 1>(vec![JointType::SixDOF], vec![0]);
+
+    let err = MultiBody::<1, 1>::from_config(cfg).err().unwrap();
+    assert_eq!(err, "NUM_DOFS must equal sum of joint dimensions");
+}
+
+#[test]
+fn rejects_invalid_parent_topology() {
+    let later_parent = simple_config::<2, 2>(vec![JointType::Revolute(Axis::Z); 2], vec![2, 0]);
+    assert_eq!(
+        MultiBody::<2, 2>::from_config(later_parent).err().unwrap(),
+        "parent must reference an earlier body"
+    );
+
+    let out_of_range = simple_config::<2, 2>(vec![JointType::Revolute(Axis::Z); 2], vec![0, 3]);
+    assert_eq!(
+        MultiBody::<2, 2>::from_config(out_of_range).err().unwrap(),
+        "parent index out of range"
+    );
+}
+
+#[test]
+fn legacy_new_returns_err_for_short_optional_vectors() {
+    let result = MultiBody::<2, 2>::new(
+        vec![na::Isometry3::identity(); 2],
+        Some(vec![na::SMatrix::<f64, 6, 6>::identity()]),
+        None,
+        None,
+        vec![JointType::Revolute(Axis::Z); 2],
+        vec![0, 1],
+        na::Vector3::zeros(),
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
+
+    assert_eq!(result.err().unwrap(), "mass_matrices length mismatch");
+}
+
+#[test]
+fn rejects_partial_scalar_mass_properties() {
+    let mut cfg = simple_config::<1, 1>(vec![JointType::Revolute(Axis::Z)], vec![0]);
+    cfg.link_props = Some(vec![LinkProperties {
+        mass: Some(1.0),
+        r_com: Some(na::Vector3::zeros()),
+        inertia3: None,
+        ..LinkProperties::default()
+    }]);
+
+    assert_eq!(
+        MultiBody::<1, 1>::from_config(cfg).err().unwrap(),
+        "mass, r_com, and inertia3 must all be provided together"
+    );
+}
+
+#[test]
+fn legacy_new_preserves_missing_rho_as_zero_density() {
+    let mass = 2.0;
+    let gravity = na::Vector3::new(0.0, 0.0, -9.81);
+    let mb = MultiBody::<1, 1>::new(
+        vec![na::Isometry3::identity()],
+        None,
+        None,
+        Some(vec![na::Matrix3::identity()]),
+        vec![JointType::Revolute(Axis::Z)],
+        vec![0],
+        gravity,
+        Some(vec![na::Vector3::zeros()]),
+        Some(vec![na::Vector3::zeros()]),
+        Some(vec![mass]),
+        Some(vec![1.0]),
+        None,
+    )
+    .unwrap();
+
+    let force =
+        mb.compute_hydrostatic_force(&na::UnitQuaternion::identity(), &na::Vector3::zeros(), 0);
+
+    assert_relative_eq!(force.fixed_rows::<3>(0).into_owned(), mass * gravity);
+}
+
+#[test]
+fn try_minimal_configuration_validates_input_lengths() {
+    let mb = MultiBody::<2, 7>::from_config(simple_config::<2, 7>(
+        vec![JointType::SixDOF, JointType::Revolute(Axis::Z)],
+        vec![0, 1],
+    ))
+    .unwrap();
+
+    let no_six_dof_vars: Vec<na::Isometry3<f64>> = Vec::new();
+    let scalar = na::SVector::<f64, 1>::zeros();
+    assert_eq!(
+        mb.try_minimal_to_homogeneous_configuration(&no_six_dof_vars, &scalar)
+            .unwrap_err(),
+        "six_dof_vars length mismatch"
+    );
+
+    let base = na::Isometry3::identity();
+    let too_many_scalars = na::SVector::<f64, 2>::zeros();
+    assert_eq!(
+        mb.try_minimal_to_homogeneous_configuration(&base, &too_many_scalars)
+            .unwrap_err(),
+        "scalar_joint_vars length mismatch"
+    );
+}
+
+#[test]
+fn mass6_supplies_gravity_mass_properties() {
+    let mass = 2.0;
+    let r_com = na::Vector3::new(0.1, -0.2, 0.3);
+    let mut mass6 = na::SMatrix::<f64, 6, 6>::zeros();
+    mass6
+        .fixed_view_mut::<3, 3>(0, 0)
+        .copy_from(&(mass * na::Matrix3::identity()));
+    mass6
+        .fixed_view_mut::<3, 3>(0, 3)
+        .copy_from(&(-mass * skew(&r_com)));
+    mass6
+        .fixed_view_mut::<3, 3>(3, 0)
+        .copy_from(&(mass * skew(&r_com)));
+    mass6
+        .fixed_view_mut::<3, 3>(3, 3)
+        .copy_from(&na::Matrix3::identity());
+
+    let mb = MultiBody::<1, 6>::from_config(MultiBodyConfig {
+        topology: Topology {
+            offset_matrices: vec![na::Isometry3::identity()],
+            joint_types: vec![JointType::SixDOF],
+            parent: vec![0],
+        },
+        link_props: Some(vec![LinkProperties {
+            mass6: Some(mass6),
+            ..LinkProperties::default()
+        }]),
+        env: Environment {
+            gravity: na::Vector3::new(0.0, 0.0, -9.81),
+            rho: 1025.0,
+        },
+    })
+    .unwrap();
+
+    let force =
+        mb.compute_hydrostatic_force(&na::UnitQuaternion::identity(), &na::Vector3::zeros(), 0);
+    let expected_linear = mass * na::Vector3::new(0.0, 0.0, -9.81);
+    let expected_rotational = mass * skew(&r_com) * na::Vector3::new(0.0, 0.0, -9.81);
+
+    assert_relative_eq!(force.fixed_rows::<3>(0).into_owned(), expected_linear);
+    assert_relative_eq!(force.fixed_rows::<3>(3).into_owned(), expected_rotational);
+}
+
+#[test]
+fn try_regressor_rejects_wrong_joint_shape() {
+    let mb = MultiBody::<1, 1>::from_config(simple_config::<1, 1>(
+        vec![JointType::Revolute(Axis::Z)],
+        vec![0],
+    ))
+    .unwrap();
+    let body = |_: &na::Isometry3<f64>,
+                _: &na::SVector<f64, 6>,
+                _: &na::SVector<f64, 6>,
+                _: &na::SVector<f64, 6>|
+     -> na::SMatrix<f64, 6, 2> { na::SMatrix::<f64, 6, 2>::zeros() };
+    let joint = |_: &na::Isometry3<f64>,
+                 _: JointKinArg,
+                 _: JointKinArg,
+                 _: JointKinArg|
+     -> JointRegressorOut<2> {
+        JointRegressorOut::Matrix(na::SMatrix::<f64, 6, 2>::zeros())
+    };
+    let body_ref: &BodyRegressorFn<2> = &body;
+    let joint_ref: &JointRegressorFn<2> = &joint;
+    let conf = vec![na::Isometry3::identity()];
+    let mu = na::SVector::<f64, 1>::zeros();
+
+    assert_eq!(
+        mb.try_compute_regressor_matrix([body_ref], [joint_ref], &conf, &mu, &mu, &mu)
+            .unwrap_err(),
+        "scalar joint regressor returned Matrix"
+    );
+}

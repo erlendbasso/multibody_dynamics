@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 use approx::assert_relative_eq;
 use multibody_dynamics::multibody::*;
 use nalgebra as na;
@@ -38,8 +40,8 @@ fn per_body_vs_batch_jacobian() {
     let conf = mb.minimal_to_homogeneous_configuration(&base, &joint_angles);
 
     let j_all = mb.compute_jacobians(&conf);
-    for body in 0..3 {
+    for (body, jac_all_body) in j_all.iter().enumerate().take(3) {
         let j_single = mb.compute_jacobian(&conf, body);
-        assert_relative_eq!(j_all[body], j_single, epsilon = 1e-12);
+        assert_relative_eq!(*jac_all_body, j_single, epsilon = 1e-12);
     }
 }
