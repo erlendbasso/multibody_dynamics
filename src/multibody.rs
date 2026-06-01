@@ -779,7 +779,12 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
                 let U_i_col = M_a[i] * phi_col; // 6x1
                 let V_i_scalar = phi_col.transpose() * U_i_col; // 1x1
                 let u_i_scalar = (eta.rows(idx, 1)[0]) - (phi_col.transpose() * b[i])[0];
-                let inv_scalar = 1.0 / V_i_scalar[(0, 0)];
+                let v_scalar = V_i_scalar[(0, 0)];
+                assert!(
+                    v_scalar.is_finite() && v_scalar.abs() > f64::EPSILON,
+                    "scalar joint matrix inversion failed"
+                );
+                let inv_scalar = 1.0 / v_scalar;
 
                 // Build v_i as static 6x1 for downstream use
                 let mut v_i = Vector6::<f64>::zeros();
