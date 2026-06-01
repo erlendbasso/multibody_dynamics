@@ -466,7 +466,8 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
             .joint_types
             .iter()
             .filter(|joint_type| !matches!(joint_type, JointType::SixDOF))
-            .count();
+            .map(joint_dim)
+            .sum::<usize>();
         if D != expected_scalar_dofs {
             return Err("scalar_joint_vars length mismatch");
         }
@@ -1077,14 +1078,14 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
                 nu = SMatrix::<f64, 6, 6>::identity() * Phi_j * mu_j;
                 h = h_j;
             } else {
-                Ad_h_inv = Ad(&h.inverse());
+                Ad_h_inv = Ad_inv(&h);
                 nu += Ad_h_inv * Phi_j * mu_j;
                 h = h_j * h;
             }
             j = lambda(j) as usize;
             let idx_j = j + self.joint_size_offsets[j];
             let Phi_j = self.Phi.view((0, idx_j), (6, self.joint_dims[j]));
-            let jac_j = -ad_se3(&nu) * Ad(&h.inverse()) * Phi_j;
+            let jac_j = -ad_se3(&nu) * Ad_inv(&h) * Phi_j;
             jacobian_deriv
                 .view_mut((0, idx_j), (6, self.joint_dims[j]))
                 .copy_from(&jac_j);
