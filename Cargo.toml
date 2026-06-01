@@ -1,17 +1,19 @@
 [package]
 name = "multibody_dynamics"
-version = "0.3.0"
+version = "0.4.0"
 authors = ["Erlend Basso <erlendbasso@gmail.com>"]
 description = "Multibody dynamics algorithms in Rust"
 edition = "2021"
 license = "GPL-3.0"
 homepage = "https://github.com/erlendbasso/multibody_dynamics"
 repository = "https://github.com/erlendbasso/multibody_dynamics"
+# Criterion benches need harness = false, so list each benchmark target explicitly below.
+autobenches = false
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-nalgebra = { version = "0.33", default-features = false, features = [
+nalgebra = { version = "0.34", default-features = false, features = [
     "libm",
     "alloc",
 ] }
@@ -21,3 +23,33 @@ num-traits = { version = "0.2", default-features = false, features = ["libm"] }
 # typenum        = "1.12"
 # num-traits     = { version = "0.2", default-features = false }
 approx = "0.5"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "core_benches"
+harness = false
+
+[[bench]]
+name = "forward_dynamics_alloc"
+harness = false
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+debug = false
+
+[profile.bench]
+inherits = "release"
+debug = true   # keep symbols for profiler
+
+[profile.dev]
+opt-level = 2
+debug = true
+debug-assertions = true
+overflow-checks = true
+incremental = true

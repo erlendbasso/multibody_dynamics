@@ -4,45 +4,50 @@ extern crate nalgebra as na;
 
 use na::{Dyn, Isometry3, Matrix3, Matrix6, OMatrix, OVector, SMatrix, Vector3, Vector6};
 
+#[inline(always)]
 pub fn Ad_inv(h: &Isometry3<f64>) -> Matrix6<f64> {
+    // Fast adjoint of inverse without constructing homogeneous matrix or calling inverse().
     let mut Ad_h_inv = Matrix6::zeros();
-    // let R_inv = h.rotation.to_rotation_matrix().matrix().transpose();
-    // let R_inv = h.rotation.to_rotation_matrix()
-    let h_inv = h.inverse().to_homogeneous();
-    let R_inv = h_inv.fixed_view::<3, 3>(0, 0);
-    let p: Vector3<f64> = h_inv.fixed_view::<3, 1>(0, 3).into();
+    let R = h.rotation.to_rotation_matrix();
+    let R_inv = R.matrix().transpose();
+    // p_inv = -R^T * p
+    let p_inv: Vector3<f64> = -(R_inv * h.translation.vector);
 
     Ad_h_inv.fixed_view_mut::<3, 3>(0, 0).copy_from(&R_inv);
-
     Ad_h_inv
         .fixed_view_mut::<3, 3>(0, 3)
-        .copy_from(&(skew(&p) * R_inv));
+        .copy_from(&(skew(&p_inv) * R_inv));
     Ad_h_inv.fixed_view_mut::<3, 3>(3, 3).copy_from(&R_inv);
     Ad_h_inv
 }
 
+#[inline(always)]
 pub fn Ad(h: &Isometry3<f64>) -> Matrix6<f64> {
+    // Fast adjoint without constructing a 4x4 homogeneous matrix.
     let mut Ad_h = Matrix6::zeros();
-    let h = h.to_homogeneous();
-    let R = h.fixed_view::<3, 3>(0, 0);
-    let p: Vector3<f64> = h.fixed_view::<3, 1>(0, 3).into();
-
-    Ad_h.fixed_view_mut::<3, 3>(0, 0).copy_from(&R);
-
-    Ad_h.fixed_view_mut::<3, 3>(0, 3).copy_from(&(skew(&p) * R));
-    Ad_h.fixed_view_mut::<3, 3>(3, 3).copy_from(&R);
+    let R = h.rotation.to_rotation_matrix();
+    let Rm = R.matrix();
+    let p: &Vector3<f64> = &h.translation.vector;
+    Ad_h.fixed_view_mut::<3, 3>(0, 0).copy_from(Rm);
+    Ad_h.fixed_view_mut::<3, 3>(0, 3).copy_from(&(skew(p) * Rm));
+    Ad_h.fixed_view_mut::<3, 3>(3, 3).copy_from(Rm);
     Ad_h
 }
 
+#[inline(always)]
 pub fn skew<T: na::RealField + Copy>(v: &Vector3<T>) -> Matrix3<T> {
-    let mut skew = Matrix3::<T>::zeros();
-    skew[(0, 1)] = -v[2];
-    skew[(0, 2)] = v[1];
-    skew[(1, 0)] = v[2];
-    skew[(1, 2)] = -v[0];
-    skew[(2, 0)] = -v[1];
-    skew[(2, 1)] = v[0];
-    skew
+    // Construct directly to avoid zero-initialization + element stores.
+    Matrix3::new(
+        T::zero(),
+        -v[2],
+        v[1],
+        v[2],
+        T::zero(),
+        -v[0],
+        -v[1],
+        v[0],
+        T::zero(),
+    )
 }
 
 pub fn ad_se3(v: &Vector6<f64>) -> SMatrix<f64, 6, 6> {
