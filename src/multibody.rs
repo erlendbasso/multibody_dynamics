@@ -717,6 +717,7 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
         // TODO: Consider consolidating lesser-used arguments (thruster forces, environment terms)
         // into a context struct to appease clippy::too_many_arguments without harming ergonomics.
         let mut h = vec![Isometry3::<f64>::identity(); NUM_BODIES];
+        let mut Ad_h_inv_cache = vec![Matrix6::<f64>::zeros(); NUM_BODIES];
         let mut nu = vec![Vector6::<f64>::zeros(); NUM_BODIES];
         let mut alpha = vec![Vector6::<f64>::zeros(); NUM_BODIES];
         let mut sigma = SVector::<f64, NUM_DOFS>::zeros();
@@ -747,15 +748,16 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
         for i in 0..NUM_BODIES {
             let idx = i + self.joint_size_offsets[i];
             h[i] = self.offset_matrices[i] * conf[i];
+            Ad_h_inv_cache[i] = Ad_inv(&h[i]);
 
             let Phi_i = self.Phi.view((0, idx), (6, self.joint_dims[i]));
             let mu_i = mu.rows(idx, self.joint_dims[i]);
 
             if lambda(i) == -1 {
-                nu[i] = Ad(&h[i].inverse()) * nu_0 + Phi_i * mu_i;
+                nu[i] = Ad_h_inv_cache[i] * nu_0 + Phi_i * mu_i;
                 a_e[i] = h[i].rotation.inverse() * a_e0;
             } else {
-                nu[i] = Ad(&h[i].inverse()) * nu[lambda(i) as usize] + Phi_i * mu_i;
+                nu[i] = Ad_h_inv_cache[i] * nu[lambda(i) as usize] + Phi_i * mu_i;
                 a_e[i] = h[i].rotation.inverse() * a_e[lambda(i) as usize];
             }
             let quat = UnitQuaternion::from_quaternion(*h[i].rotation.quaternion());
@@ -796,7 +798,7 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
                     let M_bar = M_a[i] - outer * inv_scalar;
                     let b_bar =
                         b[i] + M_bar * ad_se3(&nu[i]) * v_i + U_i_col * (inv_scalar * u_i_scalar);
-                    let Ad_h_i_inv = Ad(&h[i].inverse());
+                    let Ad_h_i_inv = Ad_h_inv_cache[i];
                     M_a[lambda(i) as usize] =
                         M_a[lambda(i) as usize] + Ad_h_i_inv.transpose() * M_bar * Ad_h_i_inv;
                     b[lambda(i) as usize] = b[lambda(i) as usize] + Ad_h_i_inv.transpose() * b_bar;
@@ -826,7 +828,7 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
                     let M_bar = M_a[i] - U_i_block * V_i_inv_block * U_i_block.transpose();
                     let b_bar =
                         b[i] + M_bar * ad_se3(&nu[i]) * v_i + U_i_block * V_i_inv_block * u_i_block;
-                    let Ad_h_i_inv = Ad(&h[i].inverse());
+                    let Ad_h_i_inv = Ad_h_inv_cache[i];
                     M_a[lambda(i) as usize] =
                         M_a[lambda(i) as usize] + Ad_h_i_inv.transpose() * M_bar * Ad_h_i_inv;
                     b[lambda(i) as usize] = b[lambda(i) as usize] + Ad_h_i_inv.transpose() * b_bar;
@@ -858,7 +860,7 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
                 v_i.copy_from(&(Phi_i * mu_i));
             }
 
-            let Ad_h_i_inv = Ad(&h[i].inverse());
+            let Ad_h_i_inv = Ad_h_inv_cache[i];
 
             let alpha_bar: SVector<f64, 6> = if lambda(i) == -1 {
                 Ad_h_i_inv * alpha_0 + ad_se3(&nu[i]) * v_i
@@ -1108,7 +1110,7 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
             mu_bar,
             sigma_bar,
         )
-        .expect("joint regressor output shape does not match joint type")
+        .expect("regressor input validation failed")
     }
 
     /// Checked variant of [`compute_regressor_matrix`].
@@ -1121,6 +1123,9 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
         mu_bar: &SVector<f64, NUM_DOFS>,
         sigma_bar: &SVector<f64, NUM_DOFS>,
     ) -> Result<SMatrix<f64, NUM_DOFS, NUM_PARAMS>, &'static str> {
+        if conf.len() != NUM_BODIES {
+            return Err("conf length mismatch");
+        }
         let mut regressor = SMatrix::<f64, NUM_DOFS, NUM_PARAMS>::zeros();
         // Compute the regressor matrix
         let mut W: Vec<SMatrix<f64, 6, NUM_PARAMS>> =

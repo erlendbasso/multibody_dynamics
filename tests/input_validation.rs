@@ -213,3 +213,34 @@ fn try_regressor_rejects_wrong_joint_shape() {
         "scalar joint regressor returned Matrix"
     );
 }
+
+#[test]
+fn try_regressor_validates_configuration_length() {
+    let mb = MultiBody::<1, 1>::from_config(simple_config::<1, 1>(
+        vec![JointType::Revolute(Axis::Z)],
+        vec![0],
+    ))
+    .unwrap();
+    let body = |_: &na::Isometry3<f64>,
+                _: &na::SVector<f64, 6>,
+                _: &na::SVector<f64, 6>,
+                _: &na::SVector<f64, 6>|
+     -> na::SMatrix<f64, 6, 2> { na::SMatrix::<f64, 6, 2>::zeros() };
+    let joint = |_: &na::Isometry3<f64>,
+                 _: JointKinArg,
+                 _: JointKinArg,
+                 _: JointKinArg|
+     -> JointRegressorOut<2> {
+        JointRegressorOut::Row(na::SMatrix::<f64, 1, 2>::zeros())
+    };
+    let body_ref: &BodyRegressorFn<2> = &body;
+    let joint_ref: &JointRegressorFn<2> = &joint;
+    let conf: Vec<na::Isometry3<f64>> = Vec::new();
+    let mu = na::SVector::<f64, 1>::zeros();
+
+    assert_eq!(
+        mb.try_compute_regressor_matrix([body_ref], [joint_ref], &conf, &mu, &mu, &mu)
+            .unwrap_err(),
+        "conf length mismatch"
+    );
+}
