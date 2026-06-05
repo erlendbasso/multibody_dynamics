@@ -18,7 +18,7 @@ Add the crate to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-multibody_dynamics = "0.4.0"
+multibody_dynamics = "0.4.1"
 ```
 
 For local development from this repository:
