@@ -114,7 +114,8 @@ semi-implicit Euler and RK4 through `IntegrationOptions`.
 
 For `SixDOF` joints, generalized velocities are interpreted as body-frame
 twists ordered `[linear; angular]`, matching the crate's spatial-vector
-conventions.
+conventions. The RK4 mode uses a fourth-order generalized-velocity update and
+ordered SE(3) stage composition for `SixDOF` poses.
 
 ## Development
 

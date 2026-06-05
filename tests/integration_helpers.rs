@@ -462,3 +462,35 @@ fn try_step_dynamics_validates_inputs() {
         "thruster_forces length mismatch"
     );
 }
+
+#[test]
+#[should_panic(expected = "thruster_forces length mismatch")]
+fn step_dynamics_panics_with_validation_reason() {
+    let model = one_body_model::<1>(JointType::Revolute(Axis::Z));
+    let rigid_body_forces = |_: &[na::Isometry3<f64>], _: &[Vector6]| -> na::SMatrix<f64, 6, 1> {
+        na::SMatrix::<f64, 6, 1>::zeros()
+    };
+    let eta = na::SVector::<f64, 1>::zeros();
+    let zero3 = Vector3::zeros();
+    let empty_thrusters: Vec<Vector6> = Vec::new();
+    let input = DynamicsStepInput {
+        rigid_body_forces: &rigid_body_forces,
+        thruster_forces: &empty_thrusters,
+        eta: &eta,
+        lin_vel_current: &zero3,
+        lin_accel_current: &zero3,
+    };
+    let state = DynamicsState::<1, 1> {
+        conf: vec![na::Isometry3::identity()],
+        mu: na::SVector::<f64, 1>::zeros(),
+    };
+
+    model.step_dynamics(
+        &state,
+        input,
+        IntegrationOptions {
+            dt: 0.1,
+            method: IntegrationMethod::SemiImplicitEuler,
+        },
+    );
+}

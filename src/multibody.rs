@@ -194,7 +194,10 @@ pub struct DynamicsStepInput<'a, const NUM_BODIES: usize, const NUM_DOFS: usize>
 pub enum IntegrationMethod {
     /// Update velocity first, then advance configuration with the new velocity.
     SemiImplicitEuler,
-    /// Fourth-order Runge-Kutta over generalized velocity and joint configuration.
+    /// Fourth-order Runge-Kutta velocity update.
+    ///
+    /// Scalar joint configurations use the RK4 weighted velocity. `SixDOF` joint poses use ordered
+    /// stage exponential composition for their body-frame twists.
     Rk4,
 }
 
@@ -608,39 +611,44 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
     /// Advances the dynamics state by one timestep.
     ///
     /// This is the panic-on-error wrapper around [`try_step_dynamics`].
-    pub fn step_dynamics<'a>(
+    pub fn step_dynamics(
         &self,
         state: &DynamicsState<NUM_BODIES, NUM_DOFS>,
-        input: DynamicsStepInput<'a, NUM_BODIES, NUM_DOFS>,
+        input: DynamicsStepInput<'_, NUM_BODIES, NUM_DOFS>,
         options: IntegrationOptions,
     ) -> DynamicsState<NUM_BODIES, NUM_DOFS> {
-        self.try_step_dynamics(state, input, options)
-            .expect("dynamics step input validation failed")
+        match self.try_step_dynamics(state, input, options) {
+            Ok(state) => state,
+            Err(err) => panic!("{}", err),
+        }
     }
 
     /// Checked variant of [`step_dynamics`].
-    pub fn try_step_dynamics<'a>(
+    pub fn try_step_dynamics(
         &self,
         state: &DynamicsState<NUM_BODIES, NUM_DOFS>,
-        input: DynamicsStepInput<'a, NUM_BODIES, NUM_DOFS>,
+        input: DynamicsStepInput<'_, NUM_BODIES, NUM_DOFS>,
         options: IntegrationOptions,
     ) -> Result<DynamicsState<NUM_BODIES, NUM_DOFS>, &'static str> {
         self.validate_dynamics_step(state, input, options)?;
+        let mut workspace = ForwardDynamicsWorkspace::<NUM_BODIES>::new();
 
         let next_state = match options.method {
             IntegrationMethod::SemiImplicitEuler => {
-                self.step_dynamics_euler(state, input, options.dt)
+                self.step_dynamics_euler(state, input, options.dt, &mut workspace)
             }
-            IntegrationMethod::Rk4 => self.step_dynamics_rk4(state, input, options.dt),
+            IntegrationMethod::Rk4 => {
+                self.step_dynamics_rk4(state, input, options.dt, &mut workspace)
+            }
         };
 
         Ok(next_state)
     }
 
-    fn validate_dynamics_step<'a>(
+    fn validate_dynamics_step(
         &self,
         state: &DynamicsState<NUM_BODIES, NUM_DOFS>,
-        input: DynamicsStepInput<'a, NUM_BODIES, NUM_DOFS>,
+        input: DynamicsStepInput<'_, NUM_BODIES, NUM_DOFS>,
         options: IntegrationOptions,
     ) -> Result<(), &'static str> {
         if !options.dt.is_finite() || options.dt < 0.0 {
@@ -655,47 +663,49 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
         Ok(())
     }
 
-    fn step_dynamics_euler<'a>(
+    fn step_dynamics_euler(
         &self,
         state: &DynamicsState<NUM_BODIES, NUM_DOFS>,
-        input: DynamicsStepInput<'a, NUM_BODIES, NUM_DOFS>,
+        input: DynamicsStepInput<'_, NUM_BODIES, NUM_DOFS>,
         dt: f64,
+        workspace: &mut ForwardDynamicsWorkspace<NUM_BODIES>,
     ) -> DynamicsState<NUM_BODIES, NUM_DOFS> {
-        let acceleration = self.dynamics_acceleration(state, input);
+        let acceleration = self.dynamics_acceleration(state, input, workspace);
         let mu = state.mu + dt * acceleration;
         let conf = self.advance_configuration(&state.conf, &mu, dt);
 
         DynamicsState { conf, mu }
     }
 
-    fn step_dynamics_rk4<'a>(
+    fn step_dynamics_rk4(
         &self,
         state: &DynamicsState<NUM_BODIES, NUM_DOFS>,
-        input: DynamicsStepInput<'a, NUM_BODIES, NUM_DOFS>,
+        input: DynamicsStepInput<'_, NUM_BODIES, NUM_DOFS>,
         dt: f64,
+        workspace: &mut ForwardDynamicsWorkspace<NUM_BODIES>,
     ) -> DynamicsState<NUM_BODIES, NUM_DOFS> {
-        let k1_mu = self.dynamics_acceleration(state, input);
+        let k1_mu = self.dynamics_acceleration(state, input, workspace);
         let k1_conf_velocity = state.mu;
 
         let state2 = DynamicsState {
             conf: self.advance_configuration(&state.conf, &k1_conf_velocity, 0.5 * dt),
             mu: state.mu + 0.5 * dt * k1_mu,
         };
-        let k2_mu = self.dynamics_acceleration(&state2, input);
+        let k2_mu = self.dynamics_acceleration(&state2, input, workspace);
         let k2_conf_velocity = state2.mu;
 
         let state3 = DynamicsState {
             conf: self.advance_configuration(&state.conf, &k2_conf_velocity, 0.5 * dt),
             mu: state.mu + 0.5 * dt * k2_mu,
         };
-        let k3_mu = self.dynamics_acceleration(&state3, input);
+        let k3_mu = self.dynamics_acceleration(&state3, input, workspace);
         let k3_conf_velocity = state3.mu;
 
         let state4 = DynamicsState {
             conf: self.advance_configuration(&state.conf, &k3_conf_velocity, dt),
             mu: state.mu + dt * k3_mu,
         };
-        let k4_mu = self.dynamics_acceleration(&state4, input);
+        let k4_mu = self.dynamics_acceleration(&state4, input, workspace);
         let k4_conf_velocity = state4.mu;
 
         let mu = state.mu + (dt / 6.0) * (k1_mu + 2.0 * k2_mu + 2.0 * k3_mu + k4_mu);
@@ -711,12 +721,13 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
         DynamicsState { conf, mu }
     }
 
-    fn dynamics_acceleration<'a>(
+    fn dynamics_acceleration(
         &self,
         state: &DynamicsState<NUM_BODIES, NUM_DOFS>,
-        input: DynamicsStepInput<'a, NUM_BODIES, NUM_DOFS>,
+        input: DynamicsStepInput<'_, NUM_BODIES, NUM_DOFS>,
+        workspace: &mut ForwardDynamicsWorkspace<NUM_BODIES>,
     ) -> SVector<f64, NUM_DOFS> {
-        self.forward_dynamics_ab(
+        self.forward_dynamics_ab_with_workspace(
             &state.conf,
             &state.mu,
             input.rigid_body_forces,
@@ -724,6 +735,7 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
             input.eta,
             input.lin_vel_current,
             input.lin_accel_current,
+            workspace,
         )
     }
 
@@ -755,12 +767,12 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
         let mut next_conf = Vec::with_capacity(NUM_BODIES);
 
         for (i, conf_i) in conf.iter().enumerate().take(NUM_BODIES) {
-            let idx = i + self.joint_size_offsets[i];
             match &self.joint_types[i] {
                 JointType::Revolute(_) | JointType::Prismatic(_) => {
                     next_conf.push(*conf_i * self.joint_delta(i, &scalar_velocity, dt));
                 }
                 JointType::SixDOF => {
+                    let idx = i + self.joint_size_offsets[i];
                     // Body-frame SE(3) twists from different RK stages live in their staged
                     // frames, so compose ordered stage exponentials instead of averaging twists.
                     let delta = exp_se3(&(Self::six_dof_twist(k1, idx) * (dt / 6.0)))
