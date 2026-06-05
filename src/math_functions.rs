@@ -2,7 +2,10 @@
 #![allow(dead_code)]
 extern crate nalgebra as na;
 
-use na::{Dyn, Isometry3, Matrix3, Matrix6, OMatrix, OVector, SMatrix, Vector3, Vector6};
+use na::{
+    Dyn, Isometry3, Matrix3, Matrix6, OMatrix, OVector, SMatrix, Translation3, UnitQuaternion,
+    Vector3, Vector6,
+};
 
 #[inline(always)]
 pub fn Ad_inv(h: &Isometry3<f64>) -> Matrix6<f64> {
@@ -60,6 +63,30 @@ pub fn ad_se3(v: &Vector6<f64>) -> SMatrix<f64, 6, 6> {
     ad.fixed_view_mut::<3, 3>(3, 3).copy_from(&skew(&ang_vel));
 
     ad
+}
+
+/// Computes the SE(3) exponential for a body-frame twist ordered as `[linear; angular]`.
+pub fn exp_se3(v: &Vector6<f64>) -> Isometry3<f64> {
+    let linear = v.fixed_rows::<3>(0).into_owned();
+    let angular = v.fixed_rows::<3>(3).into_owned();
+    let theta_squared = angular.norm_squared();
+    let angular_skew = skew(&angular);
+    let angular_skew_squared = angular_skew * angular_skew;
+
+    let V = if theta_squared < 1e-12 {
+        Matrix3::identity() + 0.5 * angular_skew + (1.0 / 6.0) * angular_skew_squared
+    } else {
+        let theta = theta_squared.sqrt();
+        Matrix3::identity()
+            + ((1.0 - theta.cos()) / theta_squared) * angular_skew
+            + ((theta - theta.sin()) / (theta_squared * theta)) * angular_skew_squared
+    };
+    let translation = V * linear;
+
+    Isometry3::from_parts(
+        Translation3::new(translation[0], translation[1], translation[2]),
+        UnitQuaternion::from_scaled_axis(angular),
+    )
 }
 
 pub fn ad_se3_dyn(v: &OVector<f64, Dyn>) -> OMatrix<f64, Dyn, Dyn> {
