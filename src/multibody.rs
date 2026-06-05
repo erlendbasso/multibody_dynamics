@@ -164,6 +164,51 @@ pub struct MultiBody<const NUM_BODIES: usize, const NUM_DOFS: usize> {
     rho: Option<f64>,
 }
 
+#[derive(Clone, Debug)]
+pub struct ForwardDynamicsWorkspace<const NUM_BODIES: usize> {
+    h: Vec<Isometry3<f64>>,
+    Ad_h_inv_cache: Vec<Matrix6<f64>>,
+    nu: Vec<Vector6<f64>>,
+    alpha: Vec<Vector6<f64>>,
+    a_e: Vec<Vector3<f64>>,
+    b: Vec<Vector6<f64>>,
+    M_a: Vec<Matrix6<f64>>,
+    v_inv_scalar: Vec<f64>,
+    v_inv_matrix: Vec<Matrix6<f64>>,
+    U_scalar: Vec<Vector6<f64>>,
+    U_matrix: Vec<Matrix6<f64>>,
+    u_scalar: Vec<f64>,
+    u_matrix: Vec<Vector6<f64>>,
+    joint_is_sixdof: Vec<bool>,
+}
+
+impl<const NUM_BODIES: usize> ForwardDynamicsWorkspace<NUM_BODIES> {
+    pub fn new() -> Self {
+        Self {
+            h: vec![Isometry3::<f64>::identity(); NUM_BODIES],
+            Ad_h_inv_cache: vec![Matrix6::<f64>::zeros(); NUM_BODIES],
+            nu: vec![Vector6::<f64>::zeros(); NUM_BODIES],
+            alpha: vec![Vector6::<f64>::zeros(); NUM_BODIES],
+            a_e: vec![Vector3::<f64>::zeros(); NUM_BODIES],
+            b: vec![Vector6::<f64>::zeros(); NUM_BODIES],
+            M_a: vec![Matrix6::<f64>::zeros(); NUM_BODIES],
+            v_inv_scalar: vec![0.0; NUM_BODIES],
+            v_inv_matrix: vec![Matrix6::<f64>::zeros(); NUM_BODIES],
+            U_scalar: vec![Vector6::<f64>::zeros(); NUM_BODIES],
+            U_matrix: vec![Matrix6::<f64>::zeros(); NUM_BODIES],
+            u_scalar: vec![0.0; NUM_BODIES],
+            u_matrix: vec![Vector6::<f64>::zeros(); NUM_BODIES],
+            joint_is_sixdof: vec![false; NUM_BODIES],
+        }
+    }
+}
+
+impl<const NUM_BODIES: usize> Default for ForwardDynamicsWorkspace<NUM_BODIES> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // impl<T: na::RealField  + na::ClosedAdd + na::ClosedMul + na::ClosedDiv + Copy, const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<T, NUM_BODIES, NUM_DOFS> {
 impl<const NUM_BODIES: usize, const NUM_DOFS: usize> TryFrom<MultiBodyConfig<NUM_BODIES, NUM_DOFS>>
     for MultiBody<NUM_BODIES, NUM_DOFS>
@@ -715,34 +760,63 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
         lin_vel_current: &Vector3<f64>,
         lin_accel_current: &Vector3<f64>,
     ) -> SVector<f64, NUM_DOFS> {
-        // TODO: Consider consolidating lesser-used arguments (thruster forces, environment terms)
-        // into a context struct to appease clippy::too_many_arguments without harming ergonomics.
-        let mut h = vec![Isometry3::<f64>::identity(); NUM_BODIES];
-        let mut Ad_h_inv_cache = vec![Matrix6::<f64>::zeros(); NUM_BODIES];
-        let mut nu = vec![Vector6::<f64>::zeros(); NUM_BODIES];
-        let mut alpha = vec![Vector6::<f64>::zeros(); NUM_BODIES];
+        let mut workspace = ForwardDynamicsWorkspace::<NUM_BODIES>::new();
+        self.forward_dynamics_ab_with_workspace(
+            conf,
+            mu,
+            rigid_body_forces_func,
+            thruster_forces,
+            eta,
+            lin_vel_current,
+            lin_accel_current,
+            &mut workspace,
+        )
+    }
+
+    /// Computes forward dynamics using caller-owned scratch storage.
+    ///
+    /// This is the allocation-reuse variant of [`forward_dynamics_ab`]. Reusing a workspace across
+    /// calls avoids repeatedly allocating the articulated-body algorithm's temporary buffers.
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward_dynamics_ab_with_workspace(
+        &self,
+        conf: &[Isometry3<f64>],
+        mu: &SVector<f64, NUM_DOFS>,
+        rigid_body_forces_func: impl Fn(
+            &[Isometry3<f64>],
+            &[Vector6<f64>],
+        ) -> SMatrix<f64, 6, NUM_BODIES>,
+        thruster_forces: &[Vector6<f64>],
+        eta: &SVector<f64, NUM_DOFS>,
+        lin_vel_current: &Vector3<f64>,
+        lin_accel_current: &Vector3<f64>,
+        workspace: &mut ForwardDynamicsWorkspace<NUM_BODIES>,
+    ) -> SVector<f64, NUM_DOFS> {
+        let h = &mut workspace.h;
+        let Ad_h_inv_cache = &mut workspace.Ad_h_inv_cache;
+        let nu = &mut workspace.nu;
+        let alpha = &mut workspace.alpha;
+        let a_e = &mut workspace.a_e;
+        let b = &mut workspace.b;
+        let M_a = &mut workspace.M_a;
+        let v_inv_scalar = &mut workspace.v_inv_scalar;
+        let v_inv_matrix = &mut workspace.v_inv_matrix;
+        let U_scalar = &mut workspace.U_scalar;
+        let U_matrix = &mut workspace.U_matrix;
+        let u_scalar = &mut workspace.u_scalar;
+        let u_matrix = &mut workspace.u_matrix;
+        let joint_is_sixdof = &mut workspace.joint_is_sixdof;
+
         let mut sigma = SVector::<f64, NUM_DOFS>::zeros();
 
         let mut nu_0 = Vector6::<f64>::zeros();
         nu_0.fixed_view_mut::<3, 1>(0, 0)
             .copy_from(&(-lin_vel_current));
 
-        let mut a_e = vec![Vector3::<f64>::zeros(); NUM_BODIES];
-        let mut b = vec![Vector6::<f64>::zeros(); NUM_BODIES];
         let a_e0 = self.gravity - lin_accel_current;
         a_e[0] = a_e0;
 
-        let mut M_a = self.mass_matrices.clone();
-        // Preallocate (optimization 1) and fill in reverse order indices.
-        // Store per-joint intermediate data without dynamic heap matrices.
-        // For scalar joints we use rank-1 representations (f64, Vector6); for 6DOF full Matrix6/Vector6.
-        let mut v_inv_scalar: Vec<f64> = vec![0.0; NUM_BODIES];
-        let mut v_inv_matrix: Vec<Matrix6<f64>> = vec![Matrix6::<f64>::zeros(); NUM_BODIES];
-        let mut U_scalar: Vec<Vector6<f64>> = vec![Vector6::<f64>::zeros(); NUM_BODIES];
-        let mut U_matrix: Vec<Matrix6<f64>> = vec![Matrix6::<f64>::zeros(); NUM_BODIES];
-        let mut u_scalar: Vec<f64> = vec![0.0; NUM_BODIES];
-        let mut u_matrix: Vec<Vector6<f64>> = vec![Vector6::<f64>::zeros(); NUM_BODIES];
-        let mut joint_is_sixdof: Vec<bool> = vec![false; NUM_BODIES];
+        M_a.copy_from_slice(&self.mass_matrices);
 
         let lambda = |x: usize| -> i32 { self.parent[x] as i32 - 1 };
 
@@ -751,47 +825,44 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
             h[i] = self.offset_matrices[i] * conf[i];
             Ad_h_inv_cache[i] = Ad_inv(&h[i]);
 
-            let Phi_i = self.Phi.view((0, idx), (6, self.joint_dims[i]));
-            let mu_i = mu.rows(idx, self.joint_dims[i]);
+            let joint_velocity = if self.joint_dims[i] == 1 {
+                self.Phi.fixed_view::<6, 1>(0, idx) * mu[idx]
+            } else {
+                self.Phi.fixed_view::<6, 6>(0, idx) * mu.fixed_rows::<6>(idx)
+            };
 
             if lambda(i) == -1 {
-                nu[i] = Ad_h_inv_cache[i] * nu_0 + Phi_i * mu_i;
+                nu[i] = Ad_h_inv_cache[i] * nu_0 + joint_velocity;
                 a_e[i] = h[i].rotation.inverse() * a_e0;
             } else {
-                nu[i] = Ad_h_inv_cache[i] * nu[lambda(i) as usize] + Phi_i * mu_i;
+                nu[i] = Ad_h_inv_cache[i] * nu[lambda(i) as usize] + joint_velocity;
                 a_e[i] = h[i].rotation.inverse() * a_e[lambda(i) as usize];
             }
-            let quat = UnitQuaternion::from_quaternion(*h[i].rotation.quaternion());
             b[i] = -ad_se3(&nu[i]).transpose() * M_a[i] * nu[i]
                 // - damping_func(&nu[i], &nu[i], i)
-                - self.compute_hydrostatic_force(&quat, lin_accel_current, i)
+                - self.compute_hydrostatic_force(&h[i].rotation, lin_accel_current, i)
                 - thruster_forces[i];
         }
 
-        let rigid_body_forces = rigid_body_forces_func(&h, &nu);
+        let rigid_body_forces = rigid_body_forces_func(&h[..], &nu[..]);
 
         for i in (0..NUM_BODIES).rev() {
             let idx = i + self.joint_size_offsets[i];
-            let Phi_i = self.Phi.view((0, idx), (6, self.joint_dims[i]));
-            let mu_i = mu.rows(idx, self.joint_dims[i]);
             b[i] += -rigid_body_forces.column(i);
 
             if self.joint_dims[i] == 1 {
                 // Scalar joint path.
-                let phi_col = Phi_i.column(0); // 6x1 (dynamic view)
+                let phi_col = self.Phi.fixed_view::<6, 1>(0, idx);
                 let U_i_col = M_a[i] * phi_col; // 6x1
                 let V_i_scalar = phi_col.transpose() * U_i_col; // 1x1
-                let u_i_scalar = (eta.rows(idx, 1)[0]) - (phi_col.transpose() * b[i])[0];
+                let u_i_scalar = eta[idx] - (phi_col.transpose() * b[i])[0];
                 let v_scalar = V_i_scalar[(0, 0)];
                 assert!(
                     v_scalar.is_finite() && v_scalar.abs() > f64::EPSILON,
                     "scalar joint matrix inversion failed"
                 );
                 let inv_scalar = 1.0 / v_scalar;
-
-                // Build v_i as static 6x1 for downstream use
-                let mut v_i = Vector6::<f64>::zeros();
-                v_i.copy_from(&(Phi_i * mu_i));
+                let v_i = phi_col * mu[idx];
 
                 if lambda(i) >= 0 {
                     // Rank-1 update: M_bar = M_a - U U^T / V
@@ -809,17 +880,14 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
                 u_scalar[i] = u_i_scalar;
                 joint_is_sixdof[i] = false;
             } else {
-                // 6DOF joint path: convert dynamic views to fixed-size matrices/vectors.
-                let mut Phi_block = Matrix6::<f64>::zeros();
-                Phi_block.copy_from(&Phi_i);
-                let mut v_i = Vector6::<f64>::zeros();
-                v_i.copy_from(&(Phi_block * mu_i));
+                // 6DOF joint path.
+                let Phi_block = self.Phi.fixed_view::<6, 6>(0, idx);
+                let v_i = Phi_block * mu.fixed_rows::<6>(idx);
 
                 let U_i_block = M_a[i] * Phi_block; // 6x6
                 let V_i_block = Phi_block.transpose() * U_i_block; // 6x6
 
-                let mut eta_block = Vector6::<f64>::zeros();
-                eta_block.copy_from(&eta.rows(idx, 6));
+                let eta_block = eta.fixed_rows::<6>(idx).into_owned();
                 let u_i_block = eta_block - Phi_block.transpose() * b[i]; // 6x1
                 let V_i_inv_block = V_i_block
                     .try_inverse()
@@ -848,18 +916,11 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
 
         for i in 0..NUM_BODIES {
             let idx = i + self.joint_size_offsets[i];
-            let Phi_i = self.Phi.view((0, idx), (6, self.joint_dims[i]));
-            let mu_i = mu.rows(idx, self.joint_dims[i]);
-            // Recompute v_i as fixed-size where possible.
-            let mut v_i = Vector6::<f64>::zeros();
-            if self.joint_dims[i] == 6 {
-                let mut Phi_block = Matrix6::<f64>::zeros();
-                Phi_block.copy_from(&Phi_i);
-                v_i.copy_from(&(Phi_block * mu_i));
+            let v_i = if self.joint_dims[i] == 6 {
+                self.Phi.fixed_view::<6, 6>(0, idx) * mu.fixed_rows::<6>(idx)
             } else {
-                // scalar joint: Phi_i * mu_i yields 6x1; copy into Vector6
-                v_i.copy_from(&(Phi_i * mu_i));
-            }
+                self.Phi.fixed_view::<6, 1>(0, idx) * mu[idx]
+            };
 
             let Ad_h_i_inv = Ad_h_inv_cache[i];
 
@@ -872,14 +933,14 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
                 // 6DOF variant
                 let temp = v_inv_matrix[i] * (u_matrix[i] - U_matrix[i].transpose() * alpha_bar);
                 sigma.rows_mut(idx, 6).copy_from(&temp);
-                alpha[i] = alpha_bar + Phi_i * temp;
+                alpha[i] = alpha_bar + self.Phi.fixed_view::<6, 6>(0, idx) * temp;
             } else {
                 // Scalar variant lives in scalar stacks in same order.
                 let correction = (U_scalar[i].transpose() * alpha_bar)[0];
                 let temp_scalar = v_inv_scalar[i] * (u_scalar[i] - correction);
                 // Write scalar result
                 sigma[(idx, 0)] = temp_scalar;
-                alpha[i] = alpha_bar + Phi_i * SVector::<f64, 1>::from_element(temp_scalar);
+                alpha[i] = alpha_bar + self.Phi.fixed_view::<6, 1>(0, idx) * temp_scalar;
             }
         }
 

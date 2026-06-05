@@ -1,7 +1,7 @@
 #![allow(deprecated)]
 
-use criterion::{criterion_group, criterion_main, Criterion};
-use multibody_dynamics::multibody::{Axis, JointType, MultiBody};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use multibody_dynamics::multibody::{Axis, ForwardDynamicsWorkspace, JointType, MultiBody};
 use nalgebra::{Isometry3, Matrix3, SVector, Vector3, Vector6};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -29,6 +29,22 @@ unsafe impl GlobalAlloc for CountingAlloc {
 
 #[global_allocator]
 static GLOBAL: CountingAlloc = CountingAlloc;
+
+fn reset_alloc_counts() {
+    ALLOC_CALLS.store(0, Ordering::Relaxed);
+    DEALLOC_CALLS.store(0, Ordering::Relaxed);
+    ALLOC_BYTES.store(0, Ordering::Relaxed);
+    DEALLOC_BYTES.store(0, Ordering::Relaxed);
+}
+
+fn alloc_counts() -> (usize, usize, usize, usize) {
+    (
+        ALLOC_CALLS.load(Ordering::Relaxed),
+        DEALLOC_CALLS.load(Ordering::Relaxed),
+        ALLOC_BYTES.load(Ordering::Relaxed),
+        DEALLOC_BYTES.load(Ordering::Relaxed),
+    )
+}
 
 fn build_chain<const N: usize, const DOFS: usize>() -> MultiBody<N, DOFS> {
     let mut joint_types = vec![JointType::Revolute(Axis::Z); N];
@@ -59,7 +75,7 @@ fn build_chain<const N: usize, const DOFS: usize>() -> MultiBody<N, DOFS> {
 fn bench_forward_dynamics_alloc(c: &mut Criterion) {
     // Choose a moderate chain size to exercise loops.
     const N: usize = 20;
-    const DOFS: usize = 26; // 6 + 20-1 revolute
+    const DOFS: usize = 25; // 6 + 20-1 revolute
     let mb = build_chain::<N, DOFS>();
     let base = Isometry3::identity();
     let joint_angles = SVector::<f64, { DOFS - 6 }>::from_vec(vec![0.1; DOFS - 6]);
@@ -69,41 +85,71 @@ fn bench_forward_dynamics_alloc(c: &mut Criterion) {
     let eta = SVector::<f64, DOFS>::zeros();
     let zero3 = Vector3::zeros();
     let rb = |_: &[Isometry3<f64>], _: &[Vector6<f64>]| nalgebra::SMatrix::<f64, 6, N>::zeros();
+    let mut workspace = ForwardDynamicsWorkspace::<N>::new();
 
     // Warm up once to populate any lazy statics.
     let _ = mb.forward_dynamics_ab(&conf, &mu, rb, &thruster, &eta, &zero3, &zero3);
+    let _ = mb.forward_dynamics_ab_with_workspace(
+        &conf,
+        &mu,
+        rb,
+        &thruster,
+        &eta,
+        &zero3,
+        &zero3,
+        &mut workspace,
+    );
 
-    c.bench_function("forward_dynamics_alloc_counts", |b| {
+    let mut group = c.benchmark_group("forward_dynamics_ab");
+    group.bench_function(BenchmarkId::new("allocating_api", N), |b| {
         b.iter(|| {
-            // Reset counters per measured iteration.
-            ALLOC_CALLS.store(0, Ordering::Relaxed);
-            DEALLOC_CALLS.store(0, Ordering::Relaxed);
-            ALLOC_BYTES.store(0, Ordering::Relaxed);
-            DEALLOC_BYTES.store(0, Ordering::Relaxed);
+            reset_alloc_counts();
             let _acc = mb.forward_dynamics_ab(&conf, &mu, rb, &thruster, &eta, &zero3, &zero3);
-            // Fetch counts (acts as a compiler barrier by reading atomics).
-            let a = ALLOC_CALLS.load(Ordering::Relaxed);
-            let d = DEALLOC_CALLS.load(Ordering::Relaxed);
-            let ab = ALLOC_BYTES.load(Ordering::Relaxed);
-            let db = DEALLOC_BYTES.load(Ordering::Relaxed);
-            // Emit via criterion's debug (println ends up in report); lightweight vs storing.
-            // (Can comment out if noisy.)
-            criterion::black_box((a, d, ab, db));
+            criterion::black_box(alloc_counts());
         });
     });
+    group.bench_function(BenchmarkId::new("workspace_api", N), |b| {
+        b.iter(|| {
+            reset_alloc_counts();
+            let _acc = mb.forward_dynamics_ab_with_workspace(
+                &conf,
+                &mu,
+                rb,
+                &thruster,
+                &eta,
+                &zero3,
+                &zero3,
+                &mut workspace,
+            );
+            criterion::black_box(alloc_counts());
+        });
+    });
+    group.finish();
 
-    // After the benchmark finishes, print a representative run outside timing.
-    ALLOC_CALLS.store(0, Ordering::Relaxed);
-    DEALLOC_CALLS.store(0, Ordering::Relaxed);
-    ALLOC_BYTES.store(0, Ordering::Relaxed);
-    DEALLOC_BYTES.store(0, Ordering::Relaxed);
+    reset_alloc_counts();
     let _acc = mb.forward_dynamics_ab(&conf, &mu, rb, &thruster, &eta, &zero3, &zero3);
+    let allocating_counts = alloc_counts();
+
+    reset_alloc_counts();
+    let _acc = mb.forward_dynamics_ab_with_workspace(
+        &conf,
+        &mu,
+        rb,
+        &thruster,
+        &eta,
+        &zero3,
+        &zero3,
+        &mut workspace,
+    );
+    let workspace_counts = alloc_counts();
+
     println!(
-        "Representative single-call allocations: calls={} deallocs={} bytes={} dealloc_bytes={}",
-        ALLOC_CALLS.load(Ordering::Relaxed),
-        DEALLOC_CALLS.load(Ordering::Relaxed),
-        ALLOC_BYTES.load(Ordering::Relaxed),
-        DEALLOC_BYTES.load(Ordering::Relaxed)
+        "Representative allocating API allocations: calls={} deallocs={} bytes={} dealloc_bytes={}",
+        allocating_counts.0, allocating_counts.1, allocating_counts.2, allocating_counts.3
+    );
+    println!(
+        "Representative workspace API allocations: calls={} deallocs={} bytes={} dealloc_bytes={}",
+        workspace_counts.0, workspace_counts.1, workspace_counts.2, workspace_counts.3
     );
 }
 
