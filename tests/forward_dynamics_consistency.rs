@@ -60,6 +60,19 @@ fn forward_dynamics_matches_inverse_when_no_forces() {
         &lin_vel_current,
         &lin_accel_current,
     );
+    let mut workspace = ForwardDynamicsWorkspace::<3>::new();
+    let accel_with_workspace = mb.forward_dynamics_ab_with_workspace(
+        &conf,
+        &mu,
+        rigid_body_forces_func2,
+        &thruster_forces,
+        &eta,
+        &lin_vel_current,
+        &lin_accel_current,
+        &mut workspace,
+    );
+    assert_relative_eq!(accel_with_workspace, accel, epsilon = 1e-12);
+
     let sigma_prime = na::SVector::<f64, 8>::zeros();
     let c_vec =
         mb.generalized_newton_euler(&conf, &mu, &mu, &sigma_prime, rigid_body_forces_func1, &eta);

@@ -64,10 +64,10 @@ fn bench_forward_dynamics(c: &mut Criterion) {
             }};
         }
         match n {
-            5 => run_case!(5, 11), // 6 + 4 revolute
-            10 => run_case!(10, 16),
-            20 => run_case!(20, 26),
-            40 => run_case!(40, 46),
+            5 => run_case!(5, 10), // 6 + 4 revolute
+            10 => run_case!(10, 15),
+            20 => run_case!(20, 25),
+            40 => run_case!(40, 45),
             _ => unreachable!(),
         }
     }
@@ -92,10 +92,10 @@ fn bench_mass_matrix(c: &mut Criterion) {
             }};
         }
         match n {
-            5 => run_case!(5, 11),
-            10 => run_case!(10, 16),
-            20 => run_case!(20, 26),
-            40 => run_case!(40, 46),
+            5 => run_case!(5, 10),
+            10 => run_case!(10, 15),
+            20 => run_case!(20, 25),
+            40 => run_case!(40, 45),
             _ => unreachable!(),
         }
     }
@@ -133,10 +133,10 @@ fn bench_gne(c: &mut Criterion) {
             }};
         }
         match n {
-            5 => run_case!(5, 11),
-            10 => run_case!(10, 16),
-            20 => run_case!(20, 26),
-            40 => run_case!(40, 46),
+            5 => run_case!(5, 10),
+            10 => run_case!(10, 15),
+            20 => run_case!(20, 25),
+            40 => run_case!(40, 45),
             _ => unreachable!(),
         }
     }
@@ -161,10 +161,10 @@ fn bench_jacobians(c: &mut Criterion) {
             }};
         }
         match n {
-            5 => run_case!(5, 11),
-            10 => run_case!(10, 16),
-            20 => run_case!(20, 26),
-            40 => run_case!(40, 46),
+            5 => run_case!(5, 10),
+            10 => run_case!(10, 15),
+            20 => run_case!(20, 25),
+            40 => run_case!(40, 45),
             _ => unreachable!(),
         }
     }
@@ -207,10 +207,10 @@ fn bench_jacobian_derivatives(c: &mut Criterion) {
             }};
         }
         match n {
-            5 => run_case!(5, 11),
-            10 => run_case!(10, 16),
-            20 => run_case!(20, 26),
-            40 => run_case!(40, 46),
+            5 => run_case!(5, 10),
+            10 => run_case!(10, 15),
+            20 => run_case!(20, 25),
+            40 => run_case!(40, 45),
             _ => unreachable!(),
         }
     }
