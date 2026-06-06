@@ -130,6 +130,17 @@ pub type JointRegressorFn<'a, const NUM_PARAMS: usize> = dyn Fn(
     + 'a;
 
 /// Callback type for spatial forces applied to each body during forward dynamics.
+///
+/// The first slice contains the relative body transforms used by the articulated-body
+/// recursion: `h[i] = offset_matrices[i] * conf[i]`. Each `h[i]` transforms body `i`
+/// coordinates into its parent coordinates, or into the inertial root coordinates for
+/// root bodies. Equivalently, `Ad_inv(&h[i])` maps parent-frame spatial vectors into
+/// body `i`'s frame. These are not accumulated world poses.
+///
+/// The second slice contains `nu[i]`, the spatial velocity of body `i` expressed in
+/// body `i`'s frame and ordered `[linear; angular]`. The returned matrix column `i`
+/// is the external spatial force applied to body `i`, expressed in body `i`'s frame
+/// and ordered `[force; torque]`.
 pub type RigidBodyForcesFn<'a, const NUM_BODIES: usize> =
     dyn Fn(&[Isometry3<f64>], &[Vector6<f64>]) -> SMatrix<f64, 6, NUM_BODIES> + 'a;
 
