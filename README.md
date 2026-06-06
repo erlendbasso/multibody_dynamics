@@ -101,9 +101,21 @@ The crate provides checked variants for input-sensitive operations:
 - `MultiBody::from_config`
 - `try_minimal_to_homogeneous_configuration`
 - `try_compute_regressor_matrix`
+- `try_step_dynamics`
 
 The unchecked compatibility methods panic with clear messages when the checked
 variant would return an error.
+
+## Integration Helpers
+
+`MultiBody::step_dynamics` and `MultiBody::try_step_dynamics` provide
+convenience stepping around `forward_dynamics_ab`. They support
+semi-implicit Euler and RK4 through `IntegrationOptions`.
+
+For `SixDOF` joints, generalized velocities are interpreted as body-frame
+twists ordered `[linear; angular]`, matching the crate's spatial-vector
+conventions. The RK4 mode uses a fourth-order generalized-velocity update and
+ordered SE(3) stage composition for `SixDOF` poses.
 
 ## Development
 

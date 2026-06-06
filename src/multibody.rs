@@ -129,6 +129,21 @@ pub type JointRegressorFn<'a, const NUM_PARAMS: usize> = dyn Fn(
     ) -> JointRegressorOut<NUM_PARAMS>
     + 'a;
 
+/// Callback type for spatial forces applied to each body during forward dynamics.
+///
+/// The first slice contains the relative body transforms used by the articulated-body
+/// recursion: `h[i] = offset_matrices[i] * conf[i]`. Each `h[i]` transforms body `i`
+/// coordinates into its parent coordinates, or into the inertial root coordinates for
+/// root bodies. Equivalently, `Ad_inv(&h[i])` maps parent-frame spatial vectors into
+/// body `i`'s frame. These are not accumulated world poses.
+///
+/// The second slice contains `nu[i]`, the spatial velocity of body `i` expressed in
+/// body `i`'s frame and ordered `[linear; angular]`. The returned matrix column `i`
+/// is the external spatial force applied to body `i`, expressed in body `i`'s frame
+/// and ordered `[force; torque]`.
+pub type RigidBodyForcesFn<'a, const NUM_BODIES: usize> =
+    dyn Fn(&[Isometry3<f64>], &[Vector6<f64>]) -> SMatrix<f64, 6, NUM_BODIES> + 'a;
+
 /// Allows overloading of functions for both a single 6DOF configuration and for a vector of 6DOF configurations, which is required when there are more than one 6DOF joint in the multibody system.
 pub trait IntoHomogeneousConfigurationVec {
     fn into(&self) -> Vec<Isometry3<f64>>;
@@ -162,6 +177,47 @@ pub struct MultiBody<const NUM_BODIES: usize, const NUM_DOFS: usize> {
     r_cob: Option<Vec<Vector3<f64>>>,
     volume: Option<Vec<f64>>,
     rho: Option<f64>,
+}
+
+#[derive(Clone, Debug)]
+pub struct DynamicsState<const NUM_BODIES: usize, const NUM_DOFS: usize> {
+    /// Per-joint homogeneous configurations in topology order.
+    pub conf: Vec<Isometry3<f64>>,
+    /// Generalized velocity vector.
+    pub mu: SVector<f64, NUM_DOFS>,
+}
+
+#[derive(Clone, Copy)]
+pub struct DynamicsStepInput<'a, const NUM_BODIES: usize, const NUM_DOFS: usize> {
+    /// Callback returning body-frame spatial forces for each body.
+    pub rigid_body_forces: &'a RigidBodyForcesFn<'a, NUM_BODIES>,
+    /// Per-body spatial thruster forces.
+    pub thruster_forces: &'a [Vector6<f64>],
+    /// Generalized effort input.
+    pub eta: &'a SVector<f64, NUM_DOFS>,
+    /// Ambient/current linear velocity used by the hydrodynamic forward-dynamics terms.
+    pub lin_vel_current: &'a Vector3<f64>,
+    /// Ambient/current linear acceleration used by the hydrodynamic forward-dynamics terms.
+    pub lin_accel_current: &'a Vector3<f64>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IntegrationMethod {
+    /// Update velocity first, then advance configuration with the new velocity.
+    SemiImplicitEuler,
+    /// Fourth-order Runge-Kutta velocity update.
+    ///
+    /// Scalar joint configurations use the RK4 weighted velocity. `SixDOF` joint poses use ordered
+    /// stage exponential composition for their body-frame twists.
+    Rk4,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct IntegrationOptions {
+    /// Integration timestep in seconds.
+    pub dt: f64,
+    /// Integration scheme to use for this step.
+    pub method: IntegrationMethod,
 }
 
 #[derive(Clone, Debug)]
@@ -561,6 +617,214 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
             }
         }
         Ok(conf)
+    }
+
+    /// Advances the dynamics state by one timestep.
+    ///
+    /// This is the panic-on-error wrapper around [`try_step_dynamics`].
+    pub fn step_dynamics(
+        &self,
+        state: &DynamicsState<NUM_BODIES, NUM_DOFS>,
+        input: DynamicsStepInput<'_, NUM_BODIES, NUM_DOFS>,
+        options: IntegrationOptions,
+    ) -> DynamicsState<NUM_BODIES, NUM_DOFS> {
+        match self.try_step_dynamics(state, input, options) {
+            Ok(state) => state,
+            Err(err) => panic!("{}", err),
+        }
+    }
+
+    /// Checked variant of [`step_dynamics`].
+    pub fn try_step_dynamics(
+        &self,
+        state: &DynamicsState<NUM_BODIES, NUM_DOFS>,
+        input: DynamicsStepInput<'_, NUM_BODIES, NUM_DOFS>,
+        options: IntegrationOptions,
+    ) -> Result<DynamicsState<NUM_BODIES, NUM_DOFS>, &'static str> {
+        self.validate_dynamics_step(state, input, options)?;
+        let mut workspace = ForwardDynamicsWorkspace::<NUM_BODIES>::new();
+
+        let next_state = match options.method {
+            IntegrationMethod::SemiImplicitEuler => {
+                self.step_dynamics_euler(state, input, options.dt, &mut workspace)
+            }
+            IntegrationMethod::Rk4 => {
+                self.step_dynamics_rk4(state, input, options.dt, &mut workspace)
+            }
+        };
+
+        Ok(next_state)
+    }
+
+    fn validate_dynamics_step(
+        &self,
+        state: &DynamicsState<NUM_BODIES, NUM_DOFS>,
+        input: DynamicsStepInput<'_, NUM_BODIES, NUM_DOFS>,
+        options: IntegrationOptions,
+    ) -> Result<(), &'static str> {
+        if !options.dt.is_finite() || options.dt < 0.0 {
+            return Err("dt must be finite and non-negative");
+        }
+        if state.conf.len() != NUM_BODIES {
+            return Err("conf length mismatch");
+        }
+        if input.thruster_forces.len() != NUM_BODIES {
+            return Err("thruster_forces length mismatch");
+        }
+        Ok(())
+    }
+
+    fn step_dynamics_euler(
+        &self,
+        state: &DynamicsState<NUM_BODIES, NUM_DOFS>,
+        input: DynamicsStepInput<'_, NUM_BODIES, NUM_DOFS>,
+        dt: f64,
+        workspace: &mut ForwardDynamicsWorkspace<NUM_BODIES>,
+    ) -> DynamicsState<NUM_BODIES, NUM_DOFS> {
+        let acceleration = self.dynamics_acceleration(state, input, workspace);
+        let mu = state.mu + dt * acceleration;
+        let conf = self.advance_configuration(&state.conf, &mu, dt);
+
+        DynamicsState { conf, mu }
+    }
+
+    fn step_dynamics_rk4(
+        &self,
+        state: &DynamicsState<NUM_BODIES, NUM_DOFS>,
+        input: DynamicsStepInput<'_, NUM_BODIES, NUM_DOFS>,
+        dt: f64,
+        workspace: &mut ForwardDynamicsWorkspace<NUM_BODIES>,
+    ) -> DynamicsState<NUM_BODIES, NUM_DOFS> {
+        let k1_mu = self.dynamics_acceleration(state, input, workspace);
+        let k1_conf_velocity = state.mu;
+
+        let state2 = DynamicsState {
+            conf: self.advance_configuration(&state.conf, &k1_conf_velocity, 0.5 * dt),
+            mu: state.mu + 0.5 * dt * k1_mu,
+        };
+        let k2_mu = self.dynamics_acceleration(&state2, input, workspace);
+        let k2_conf_velocity = state2.mu;
+
+        let state3 = DynamicsState {
+            conf: self.advance_configuration(&state.conf, &k2_conf_velocity, 0.5 * dt),
+            mu: state.mu + 0.5 * dt * k2_mu,
+        };
+        let k3_mu = self.dynamics_acceleration(&state3, input, workspace);
+        let k3_conf_velocity = state3.mu;
+
+        let state4 = DynamicsState {
+            conf: self.advance_configuration(&state.conf, &k3_conf_velocity, dt),
+            mu: state.mu + dt * k3_mu,
+        };
+        let k4_mu = self.dynamics_acceleration(&state4, input, workspace);
+        let k4_conf_velocity = state4.mu;
+
+        let mu = state.mu + (dt / 6.0) * (k1_mu + 2.0 * k2_mu + 2.0 * k3_mu + k4_mu);
+        let conf = self.advance_configuration_rk4(
+            &state.conf,
+            &k1_conf_velocity,
+            &k2_conf_velocity,
+            &k3_conf_velocity,
+            &k4_conf_velocity,
+            dt,
+        );
+
+        DynamicsState { conf, mu }
+    }
+
+    fn dynamics_acceleration(
+        &self,
+        state: &DynamicsState<NUM_BODIES, NUM_DOFS>,
+        input: DynamicsStepInput<'_, NUM_BODIES, NUM_DOFS>,
+        workspace: &mut ForwardDynamicsWorkspace<NUM_BODIES>,
+    ) -> SVector<f64, NUM_DOFS> {
+        self.forward_dynamics_ab_with_workspace(
+            &state.conf,
+            &state.mu,
+            input.rigid_body_forces,
+            input.thruster_forces,
+            input.eta,
+            input.lin_vel_current,
+            input.lin_accel_current,
+            workspace,
+        )
+    }
+
+    fn advance_configuration(
+        &self,
+        conf: &[Isometry3<f64>],
+        mu: &SVector<f64, NUM_DOFS>,
+        dt: f64,
+    ) -> Vec<Isometry3<f64>> {
+        let mut next_conf = Vec::with_capacity(NUM_BODIES);
+
+        for (i, conf_i) in conf.iter().enumerate().take(NUM_BODIES) {
+            next_conf.push(*conf_i * self.joint_delta(i, mu, dt));
+        }
+
+        next_conf
+    }
+
+    fn advance_configuration_rk4(
+        &self,
+        conf: &[Isometry3<f64>],
+        k1: &SVector<f64, NUM_DOFS>,
+        k2: &SVector<f64, NUM_DOFS>,
+        k3: &SVector<f64, NUM_DOFS>,
+        k4: &SVector<f64, NUM_DOFS>,
+        dt: f64,
+    ) -> Vec<Isometry3<f64>> {
+        let scalar_velocity = (k1 + 2.0 * k2 + 2.0 * k3 + k4) / 6.0;
+        let mut next_conf = Vec::with_capacity(NUM_BODIES);
+
+        for (i, conf_i) in conf.iter().enumerate().take(NUM_BODIES) {
+            match &self.joint_types[i] {
+                JointType::Revolute(_) | JointType::Prismatic(_) => {
+                    next_conf.push(*conf_i * self.joint_delta(i, &scalar_velocity, dt));
+                }
+                JointType::SixDOF => {
+                    let idx = i + self.joint_size_offsets[i];
+                    // Body-frame SE(3) twists from different RK stages live in their staged
+                    // frames, so compose ordered stage exponentials instead of averaging twists.
+                    let delta = exp_se3(&(Self::six_dof_twist(k1, idx) * (dt / 6.0)))
+                        * exp_se3(&(Self::six_dof_twist(k2, idx) * (dt / 3.0)))
+                        * exp_se3(&(Self::six_dof_twist(k3, idx) * (dt / 3.0)))
+                        * exp_se3(&(Self::six_dof_twist(k4, idx) * (dt / 6.0)));
+                    next_conf.push(*conf_i * delta);
+                }
+            }
+        }
+
+        next_conf
+    }
+
+    fn joint_delta(&self, body_id: usize, mu: &SVector<f64, NUM_DOFS>, dt: f64) -> Isometry3<f64> {
+        let idx = body_id + self.joint_size_offsets[body_id];
+        match &self.joint_types[body_id] {
+            JointType::Revolute(axis) => {
+                let angle = mu[idx] * dt;
+                let rotation = match axis {
+                    Axis::X => UnitQuaternion::from_axis_angle(&Vector3::x_axis(), angle),
+                    Axis::Y => UnitQuaternion::from_axis_angle(&Vector3::y_axis(), angle),
+                    Axis::Z => UnitQuaternion::from_axis_angle(&Vector3::z_axis(), angle),
+                };
+                Isometry3::from_parts(Translation3::identity(), rotation)
+            }
+            JointType::Prismatic(axis) => {
+                let distance = mu[idx] * dt;
+                let translation = match axis {
+                    Axis::X => Translation3::new(distance, 0.0, 0.0),
+                    Axis::Y => Translation3::new(0.0, distance, 0.0),
+                    Axis::Z => Translation3::new(0.0, 0.0, distance),
+                };
+                Isometry3::from_parts(translation, UnitQuaternion::identity())
+            }
+            JointType::SixDOF => exp_se3(&(Self::six_dof_twist(mu, idx) * dt)),
+        }
+    }
+
+    fn six_dof_twist(mu: &SVector<f64, NUM_DOFS>, idx: usize) -> Vector6<f64> {
+        Vector6::from_column_slice(mu.rows(idx, 6).as_slice())
     }
 
     pub fn generalized_newton_euler(
