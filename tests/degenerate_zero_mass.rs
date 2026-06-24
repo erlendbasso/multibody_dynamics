@@ -45,6 +45,90 @@ fn zero_mass_body_contributes_nothing() {
 }
 
 #[test]
+fn try_forward_dynamics_reports_singular_scalar_joint_inertia() {
+    let mb: MultiBody<1, 1> = MultiBody::new(
+        vec![na::Isometry3::identity()],
+        Some(vec![na::SMatrix::<f64, 6, 6>::zeros()]),
+        None,
+        None,
+        vec![JointType::Revolute(Axis::Z)],
+        vec![0],
+        na::Vector3::zeros(),
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+
+    let q = na::SVector::<f64, 1>::zeros();
+    let six_dof_vars: Vec<na::Isometry3<f64>> = Vec::new();
+    let conf = mb.minimal_to_homogeneous_configuration(&six_dof_vars, &q);
+    let mu = na::SVector::<f64, 1>::zeros();
+    let rigid_body_forces =
+        |_: &[na::Isometry3<f64>], _: &[na::SVector<f64, 6>]| na::SMatrix::<f64, 6, 1>::zeros();
+    let thruster_forces = vec![na::SVector::<f64, 6>::zeros()];
+    let eta = na::SVector::<f64, 1>::zeros();
+    let zero3 = na::Vector3::zeros();
+
+    assert_eq!(
+        mb.try_forward_dynamics_ab(
+            &conf,
+            &mu,
+            rigid_body_forces,
+            &thruster_forces,
+            &eta,
+            &zero3,
+            &zero3,
+        )
+        .unwrap_err(),
+        "scalar joint matrix inversion failed"
+    );
+}
+
+#[test]
+fn try_forward_dynamics_reports_singular_sixdof_joint_inertia() {
+    let mb: MultiBody<1, 6> = MultiBody::new(
+        vec![na::Isometry3::identity()],
+        Some(vec![na::SMatrix::<f64, 6, 6>::zeros()]),
+        None,
+        None,
+        vec![JointType::SixDOF],
+        vec![0],
+        na::Vector3::zeros(),
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+
+    let conf = vec![na::Isometry3::identity()];
+    let mu = na::SVector::<f64, 6>::zeros();
+    let rigid_body_forces =
+        |_: &[na::Isometry3<f64>], _: &[na::SVector<f64, 6>]| na::SMatrix::<f64, 6, 1>::zeros();
+    let thruster_forces = vec![na::SVector::<f64, 6>::zeros()];
+    let eta = na::SVector::<f64, 6>::zeros();
+    let zero3 = na::Vector3::zeros();
+
+    assert_eq!(
+        mb.try_forward_dynamics_ab(
+            &conf,
+            &mu,
+            rigid_body_forces,
+            &thruster_forces,
+            &eta,
+            &zero3,
+            &zero3,
+        )
+        .unwrap_err(),
+        "6x6 joint matrix inversion failed"
+    );
+}
+
+#[test]
 #[should_panic(expected = "scalar joint matrix inversion failed")]
 fn forward_dynamics_rejects_singular_scalar_joint_inertia() {
     let mb: MultiBody<1, 1> = MultiBody::new(

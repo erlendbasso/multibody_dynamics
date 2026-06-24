@@ -23,9 +23,9 @@ num-traits = { version = "0.2", default-features = false, features = ["libm"] }
 # nalgebra = "0.32"
 # typenum        = "1.12"
 # num-traits     = { version = "0.2", default-features = false }
-approx = "0.5"
 
 [dev-dependencies]
+approx = "0.5"
 criterion = { version = "0.5", features = ["html_reports"] }
 
 [[bench]]
