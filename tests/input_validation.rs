@@ -38,6 +38,22 @@ fn rejects_wrong_dof_count_before_matrix_indexing() {
 }
 
 #[test]
+fn rejects_zero_body_models() {
+    let cfg = MultiBodyConfig::<0, 0> {
+        topology: Topology {
+            offset_matrices: Vec::new(),
+            joint_types: Vec::new(),
+            parent: Vec::new(),
+        },
+        link_props: Some(Vec::new()),
+        env: Environment::default(),
+    };
+
+    let err = MultiBody::<0, 0>::from_config(cfg).err().unwrap();
+    assert_eq!(err, "NUM_BODIES must be greater than zero");
+}
+
+#[test]
 fn rejects_invalid_parent_topology() {
     let later_parent = simple_config::<2, 2>(vec![JointType::Revolute(Axis::Z); 2], vec![2, 0]);
     assert_eq!(
@@ -49,6 +65,103 @@ fn rejects_invalid_parent_topology() {
     assert_eq!(
         MultiBody::<2, 2>::from_config(out_of_range).err().unwrap(),
         "parent index out of range"
+    );
+}
+
+#[test]
+fn checked_kinematic_apis_validate_lengths_and_body_ids() {
+    let mb = MultiBody::<1, 1>::from_config(simple_config::<1, 1>(
+        vec![JointType::Revolute(Axis::Z)],
+        vec![0],
+    ))
+    .unwrap();
+    let conf = vec![na::Isometry3::identity()];
+    let empty_conf: Vec<na::Isometry3<f64>> = Vec::new();
+    let mu = na::SVector::<f64, 1>::zeros();
+    let jacs = mb.compute_jacobians(&conf);
+
+    assert_eq!(
+        mb.try_compute_mass_matrix(&empty_conf).unwrap_err(),
+        "conf length mismatch"
+    );
+    assert_eq!(
+        mb.try_compute_body_configurations(&empty_conf).unwrap_err(),
+        "conf length mismatch"
+    );
+    assert_eq!(
+        mb.try_compute_jacobians(&empty_conf).unwrap_err(),
+        "conf length mismatch"
+    );
+    assert_eq!(
+        mb.try_compute_jacobian_derivatives(&jacs, &empty_conf, &mu)
+            .unwrap_err(),
+        "conf length mismatch"
+    );
+
+    let empty_jacs: Vec<na::SMatrix<f64, 6, 1>> = Vec::new();
+    assert_eq!(
+        mb.try_compute_jacobian_derivatives(&empty_jacs, &conf, &mu)
+            .unwrap_err(),
+        "jacobians length mismatch"
+    );
+    assert_eq!(
+        mb.try_compute_jacobian(&conf, 1).unwrap_err(),
+        "body_id out of range"
+    );
+    assert_eq!(
+        mb.try_compute_jacobian_derivative(&conf, &mu, 1)
+            .unwrap_err(),
+        "body_id out of range"
+    );
+    assert_eq!(
+        mb.try_compute_hydrostatic_force(&na::UnitQuaternion::identity(), &na::Vector3::zeros(), 1)
+            .unwrap_err(),
+        "body_id out of range"
+    );
+}
+
+#[test]
+fn try_forward_dynamics_validates_slice_lengths() {
+    let mb = MultiBody::<1, 1>::from_config(simple_config::<1, 1>(
+        vec![JointType::Revolute(Axis::Z)],
+        vec![0],
+    ))
+    .unwrap();
+    let rigid_body_forces =
+        |_: &[na::Isometry3<f64>], _: &[na::SVector<f64, 6>]| na::SMatrix::<f64, 6, 1>::zeros();
+    let conf = vec![na::Isometry3::identity()];
+    let empty_conf: Vec<na::Isometry3<f64>> = Vec::new();
+    let mu = na::SVector::<f64, 1>::zeros();
+    let thruster_forces = vec![na::SVector::<f64, 6>::zeros()];
+    let empty_thrusters: Vec<na::SVector<f64, 6>> = Vec::new();
+    let eta = na::SVector::<f64, 1>::zeros();
+    let zero3 = na::Vector3::zeros();
+
+    assert_eq!(
+        mb.try_forward_dynamics_ab(
+            &empty_conf,
+            &mu,
+            rigid_body_forces,
+            &thruster_forces,
+            &eta,
+            &zero3,
+            &zero3,
+        )
+        .unwrap_err(),
+        "conf length mismatch"
+    );
+    assert_eq!(
+        mb.try_forward_dynamics_ab(
+            &conf,
+            &mu,
+            rigid_body_forces,
+            &empty_thrusters,
+            &eta,
+            &zero3,
+            &zero3,
+        )
+        .unwrap_err(),
+        "thruster_forces length mismatch"
     );
 }
 

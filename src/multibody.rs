@@ -274,6 +274,9 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> TryFrom<MultiBodyConfig<NUM
     fn try_from(cfg: MultiBodyConfig<NUM_BODIES, NUM_DOFS>) -> Result<Self, Self::Error> {
         // Validate basic sizes
         let nb = NUM_BODIES;
+        if nb == 0 {
+            return Err("NUM_BODIES must be greater than zero");
+        }
         if cfg.topology.offset_matrices.len() != nb {
             return Err("offset_matrices length mismatch");
         }
@@ -646,10 +649,10 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
 
         let next_state = match options.method {
             IntegrationMethod::SemiImplicitEuler => {
-                self.step_dynamics_euler(state, input, options.dt, &mut workspace)
+                self.step_dynamics_euler(state, input, options.dt, &mut workspace)?
             }
             IntegrationMethod::Rk4 => {
-                self.step_dynamics_rk4(state, input, options.dt, &mut workspace)
+                self.step_dynamics_rk4(state, input, options.dt, &mut workspace)?
             }
         };
 
@@ -674,18 +677,39 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
         Ok(())
     }
 
+    fn validate_configuration(&self, conf: &[Isometry3<f64>]) -> Result<(), &'static str> {
+        if conf.len() != NUM_BODIES {
+            return Err("conf length mismatch");
+        }
+        Ok(())
+    }
+
+    fn validate_body_id(&self, body_id: usize) -> Result<(), &'static str> {
+        if body_id >= NUM_BODIES {
+            return Err("body_id out of range");
+        }
+        Ok(())
+    }
+
+    fn validate_jacobians(&self, jacs: &[SMatrix<f64, 6, NUM_DOFS>]) -> Result<(), &'static str> {
+        if jacs.len() != NUM_BODIES {
+            return Err("jacobians length mismatch");
+        }
+        Ok(())
+    }
+
     fn step_dynamics_euler(
         &self,
         state: &DynamicsState<NUM_BODIES, NUM_DOFS>,
         input: DynamicsStepInput<'_, NUM_BODIES, NUM_DOFS>,
         dt: f64,
         workspace: &mut ForwardDynamicsWorkspace<NUM_BODIES>,
-    ) -> DynamicsState<NUM_BODIES, NUM_DOFS> {
-        let acceleration = self.dynamics_acceleration(state, input, workspace);
+    ) -> Result<DynamicsState<NUM_BODIES, NUM_DOFS>, &'static str> {
+        let acceleration = self.dynamics_acceleration(state, input, workspace)?;
         let mu = state.mu + dt * acceleration;
         let conf = self.advance_configuration(&state.conf, &mu, dt);
 
-        DynamicsState { conf, mu }
+        Ok(DynamicsState { conf, mu })
     }
 
     fn step_dynamics_rk4(
@@ -694,29 +718,29 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
         input: DynamicsStepInput<'_, NUM_BODIES, NUM_DOFS>,
         dt: f64,
         workspace: &mut ForwardDynamicsWorkspace<NUM_BODIES>,
-    ) -> DynamicsState<NUM_BODIES, NUM_DOFS> {
-        let k1_mu = self.dynamics_acceleration(state, input, workspace);
+    ) -> Result<DynamicsState<NUM_BODIES, NUM_DOFS>, &'static str> {
+        let k1_mu = self.dynamics_acceleration(state, input, workspace)?;
         let k1_conf_velocity = state.mu;
 
         let state2 = DynamicsState {
             conf: self.advance_configuration(&state.conf, &k1_conf_velocity, 0.5 * dt),
             mu: state.mu + 0.5 * dt * k1_mu,
         };
-        let k2_mu = self.dynamics_acceleration(&state2, input, workspace);
+        let k2_mu = self.dynamics_acceleration(&state2, input, workspace)?;
         let k2_conf_velocity = state2.mu;
 
         let state3 = DynamicsState {
             conf: self.advance_configuration(&state.conf, &k2_conf_velocity, 0.5 * dt),
             mu: state.mu + 0.5 * dt * k2_mu,
         };
-        let k3_mu = self.dynamics_acceleration(&state3, input, workspace);
+        let k3_mu = self.dynamics_acceleration(&state3, input, workspace)?;
         let k3_conf_velocity = state3.mu;
 
         let state4 = DynamicsState {
             conf: self.advance_configuration(&state.conf, &k3_conf_velocity, dt),
             mu: state.mu + dt * k3_mu,
         };
-        let k4_mu = self.dynamics_acceleration(&state4, input, workspace);
+        let k4_mu = self.dynamics_acceleration(&state4, input, workspace)?;
         let k4_conf_velocity = state4.mu;
 
         let mu = state.mu + (dt / 6.0) * (k1_mu + 2.0 * k2_mu + 2.0 * k3_mu + k4_mu);
@@ -729,7 +753,7 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
             dt,
         );
 
-        DynamicsState { conf, mu }
+        Ok(DynamicsState { conf, mu })
     }
 
     fn dynamics_acceleration(
@@ -737,8 +761,8 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
         state: &DynamicsState<NUM_BODIES, NUM_DOFS>,
         input: DynamicsStepInput<'_, NUM_BODIES, NUM_DOFS>,
         workspace: &mut ForwardDynamicsWorkspace<NUM_BODIES>,
-    ) -> SVector<f64, NUM_DOFS> {
-        self.forward_dynamics_ab_with_workspace(
+    ) -> Result<SVector<f64, NUM_DOFS>, &'static str> {
+        self.try_forward_dynamics_ab_with_workspace(
             &state.conf,
             &state.mu,
             input.rigid_body_forces,
@@ -927,8 +951,21 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
         zeta
     }
 
-    /// Computes the mass matrix of the multibody system using the composite rigid body algorithm (CRB). Assumes that GNE/MNE/AB has been called.
+    /// Computes the mass matrix of the multibody system using the composite rigid body algorithm (CRB).
+    ///
+    /// This is the panic-on-error wrapper around [`try_compute_mass_matrix`].
     pub fn compute_mass_matrix(&self, conf: &[Isometry3<f64>]) -> SMatrix<f64, NUM_DOFS, NUM_DOFS> {
+        self.try_compute_mass_matrix(conf)
+            .unwrap_or_else(|err| panic!("{}", err))
+    }
+
+    /// Checked variant of [`compute_mass_matrix`].
+    pub fn try_compute_mass_matrix(
+        &self,
+        conf: &[Isometry3<f64>],
+    ) -> Result<SMatrix<f64, NUM_DOFS, NUM_DOFS>, &'static str> {
+        self.validate_configuration(conf)?;
+
         let mut M_c = self.mass_matrices.clone();
         let mut M_o = SMatrix::<f64, NUM_DOFS, NUM_DOFS>::zeros();
         let mut h = vec![Isometry3::<f64>::identity(); NUM_BODIES];
@@ -1005,7 +1042,7 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
                 }
             }
         }
-        M_o
+        Ok(M_o)
     }
 
     /// Computes the forward dynamics using the articulated body algorithm (AB).
@@ -1024,8 +1061,35 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
         lin_vel_current: &Vector3<f64>,
         lin_accel_current: &Vector3<f64>,
     ) -> SVector<f64, NUM_DOFS> {
+        self.try_forward_dynamics_ab(
+            conf,
+            mu,
+            rigid_body_forces_func,
+            thruster_forces,
+            eta,
+            lin_vel_current,
+            lin_accel_current,
+        )
+        .unwrap_or_else(|err| panic!("{}", err))
+    }
+
+    /// Checked variant of [`forward_dynamics_ab`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_forward_dynamics_ab(
+        &self,
+        conf: &[Isometry3<f64>],
+        mu: &SVector<f64, NUM_DOFS>,
+        rigid_body_forces_func: impl Fn(
+            &[Isometry3<f64>],
+            &[Vector6<f64>],
+        ) -> SMatrix<f64, 6, NUM_BODIES>,
+        thruster_forces: &[Vector6<f64>],
+        eta: &SVector<f64, NUM_DOFS>,
+        lin_vel_current: &Vector3<f64>,
+        lin_accel_current: &Vector3<f64>,
+    ) -> Result<SVector<f64, NUM_DOFS>, &'static str> {
         let mut workspace = ForwardDynamicsWorkspace::<NUM_BODIES>::new();
-        self.forward_dynamics_ab_with_workspace(
+        self.try_forward_dynamics_ab_with_workspace(
             conf,
             mu,
             rigid_body_forces_func,
@@ -1056,6 +1120,40 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
         lin_accel_current: &Vector3<f64>,
         workspace: &mut ForwardDynamicsWorkspace<NUM_BODIES>,
     ) -> SVector<f64, NUM_DOFS> {
+        self.try_forward_dynamics_ab_with_workspace(
+            conf,
+            mu,
+            rigid_body_forces_func,
+            thruster_forces,
+            eta,
+            lin_vel_current,
+            lin_accel_current,
+            workspace,
+        )
+        .unwrap_or_else(|err| panic!("{}", err))
+    }
+
+    /// Checked variant of [`forward_dynamics_ab_with_workspace`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_forward_dynamics_ab_with_workspace(
+        &self,
+        conf: &[Isometry3<f64>],
+        mu: &SVector<f64, NUM_DOFS>,
+        rigid_body_forces_func: impl Fn(
+            &[Isometry3<f64>],
+            &[Vector6<f64>],
+        ) -> SMatrix<f64, 6, NUM_BODIES>,
+        thruster_forces: &[Vector6<f64>],
+        eta: &SVector<f64, NUM_DOFS>,
+        lin_vel_current: &Vector3<f64>,
+        lin_accel_current: &Vector3<f64>,
+        workspace: &mut ForwardDynamicsWorkspace<NUM_BODIES>,
+    ) -> Result<SVector<f64, NUM_DOFS>, &'static str> {
+        self.validate_configuration(conf)?;
+        if thruster_forces.len() != NUM_BODIES {
+            return Err("thruster_forces length mismatch");
+        }
+
         let h = &mut workspace.h;
         let Ad_h_inv_cache = &mut workspace.Ad_h_inv_cache;
         let nu = &mut workspace.nu;
@@ -1121,10 +1219,9 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
                 let V_i_scalar = phi_col.transpose() * U_i_col; // 1x1
                 let u_i_scalar = eta[idx] - (phi_col.transpose() * b[i])[0];
                 let v_scalar = V_i_scalar[(0, 0)];
-                assert!(
-                    v_scalar.is_finite() && v_scalar.abs() > f64::EPSILON,
-                    "scalar joint matrix inversion failed"
-                );
+                if !v_scalar.is_finite() || v_scalar.abs() <= f64::EPSILON {
+                    return Err("scalar joint matrix inversion failed");
+                }
                 let inv_scalar = 1.0 / v_scalar;
                 let v_i = phi_col * mu[idx];
 
@@ -1155,7 +1252,7 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
                 let u_i_block = eta_block - Phi_block.transpose() * b[i]; // 6x1
                 let V_i_inv_block = V_i_block
                     .try_inverse()
-                    .expect("6x6 joint matrix inversion failed");
+                    .ok_or("6x6 joint matrix inversion failed")?;
 
                 if lambda(i) >= 0 {
                     let M_bar = M_a[i] - U_i_block * V_i_inv_block * U_i_block.transpose();
@@ -1208,7 +1305,7 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
             }
         }
 
-        sigma
+        Ok(sigma)
     }
 
     pub fn compute_hydrostatic_force(
@@ -1217,6 +1314,19 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
         current_accel: &Vector3<f64>,
         body_id: usize,
     ) -> Vector6<f64> {
+        self.try_compute_hydrostatic_force(quat, current_accel, body_id)
+            .unwrap_or_else(|err| panic!("{}", err))
+    }
+
+    /// Checked variant of [`compute_hydrostatic_force`].
+    pub fn try_compute_hydrostatic_force(
+        &self,
+        quat: &UnitQuaternion<f64>,
+        current_accel: &Vector3<f64>,
+        body_id: usize,
+    ) -> Result<Vector6<f64>, &'static str> {
+        self.validate_body_id(body_id)?;
+
         let mut hydrostatic_force = Vector6::<f64>::zeros();
 
         let Rot = quat.to_rotation_matrix();
@@ -1246,10 +1356,21 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
             .fixed_view_mut::<3, 1>(3, 0)
             .copy_from(&rotational);
 
-        hydrostatic_force
+        Ok(hydrostatic_force)
     }
 
     pub fn compute_body_configurations(&self, config: &[Isometry3<f64>]) -> Vec<Isometry3<f64>> {
+        self.try_compute_body_configurations(config)
+            .unwrap_or_else(|err| panic!("{}", err))
+    }
+
+    /// Checked variant of [`compute_body_configurations`].
+    pub fn try_compute_body_configurations(
+        &self,
+        config: &[Isometry3<f64>],
+    ) -> Result<Vec<Isometry3<f64>>, &'static str> {
+        self.validate_configuration(config)?;
+
         let mut g = vec![Isometry3::<f64>::identity(); NUM_BODIES];
         let lambda = |x: usize| -> i32 { self.parent[x] as i32 - 1 };
 
@@ -1259,10 +1380,21 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
                 g[i] = g[lambda(i) as usize] * g[i];
             }
         }
-        g
+        Ok(g)
     }
 
     pub fn compute_jacobians(&self, config: &[Isometry3<f64>]) -> Vec<SMatrix<f64, 6, NUM_DOFS>> {
+        self.try_compute_jacobians(config)
+            .unwrap_or_else(|err| panic!("{}", err))
+    }
+
+    /// Checked variant of [`compute_jacobians`].
+    pub fn try_compute_jacobians(
+        &self,
+        config: &[Isometry3<f64>],
+    ) -> Result<Vec<SMatrix<f64, 6, NUM_DOFS>>, &'static str> {
+        self.validate_configuration(config)?;
+
         // O(N) recursive Jacobian construction.
         let mut jacs = vec![SMatrix::<f64, 6, NUM_DOFS>::zeros(); NUM_BODIES];
         let mut h = vec![Isometry3::<f64>::identity(); NUM_BODIES];
@@ -1286,7 +1418,7 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
                 .view_mut((0, idx_i), (6, self.joint_dims[i]))
                 .copy_from(&Phi_i);
         }
-        jacs
+        Ok(jacs)
     }
 
     pub fn compute_jacobian_derivatives(
@@ -1295,6 +1427,20 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
         config: &[Isometry3<f64>],
         mu: &SVector<f64, NUM_DOFS>,
     ) -> Vec<SMatrix<f64, 6, NUM_DOFS>> {
+        self.try_compute_jacobian_derivatives(jacs, config, mu)
+            .unwrap_or_else(|err| panic!("{}", err))
+    }
+
+    /// Checked variant of [`compute_jacobian_derivatives`].
+    pub fn try_compute_jacobian_derivatives(
+        &self,
+        jacs: &[SMatrix<f64, 6, NUM_DOFS>],
+        config: &[Isometry3<f64>],
+        mu: &SVector<f64, NUM_DOFS>,
+    ) -> Result<Vec<SMatrix<f64, 6, NUM_DOFS>>, &'static str> {
+        self.validate_configuration(config)?;
+        self.validate_jacobians(jacs)?;
+
         let mut jacobian_derivs = vec![SMatrix::<f64, 6, NUM_DOFS>::zeros(); NUM_BODIES];
         // Cache body transforms and adjoints once.
         let mut h = vec![Isometry3::<f64>::identity(); NUM_BODIES];
@@ -1343,7 +1489,7 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
                     .copy_from(&djac_ji);
             }
         }
-        jacobian_derivs
+        Ok(jacobian_derivs)
     }
 
     pub fn compute_jacobian(
@@ -1351,6 +1497,19 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
         config: &[Isometry3<f64>],
         body_id: usize,
     ) -> SMatrix<f64, 6, NUM_DOFS> {
+        self.try_compute_jacobian(config, body_id)
+            .unwrap_or_else(|err| panic!("{}", err))
+    }
+
+    /// Checked variant of [`compute_jacobian`].
+    pub fn try_compute_jacobian(
+        &self,
+        config: &[Isometry3<f64>],
+        body_id: usize,
+    ) -> Result<SMatrix<f64, 6, NUM_DOFS>, &'static str> {
+        self.validate_configuration(config)?;
+        self.validate_body_id(body_id)?;
+
         let mut jacobian = SMatrix::<f64, 6, NUM_DOFS>::zeros();
         let idx = body_id + self.joint_size_offsets[body_id];
         let Phi_i = self.Phi.view((0, idx), (6, self.joint_dims[body_id]));
@@ -1379,7 +1538,7 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
                 .view_mut((0, idx_j), (6, self.joint_dims[j]))
                 .copy_from(&(Ad_k_inv * Phi_j));
         }
-        jacobian
+        Ok(jacobian)
     }
 
     pub fn compute_jacobian_derivative(
@@ -1388,6 +1547,20 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
         mu: &SVector<f64, NUM_DOFS>,
         body_id: usize,
     ) -> SMatrix<f64, 6, NUM_DOFS> {
+        self.try_compute_jacobian_derivative(config, mu, body_id)
+            .unwrap_or_else(|err| panic!("{}", err))
+    }
+
+    /// Checked variant of [`compute_jacobian_derivative`].
+    pub fn try_compute_jacobian_derivative(
+        &self,
+        config: &[Isometry3<f64>],
+        mu: &SVector<f64, NUM_DOFS>,
+        body_id: usize,
+    ) -> Result<SMatrix<f64, 6, NUM_DOFS>, &'static str> {
+        self.validate_configuration(config)?;
+        self.validate_body_id(body_id)?;
+
         let mut jacobian_deriv = SMatrix::<f64, 6, NUM_DOFS>::zeros();
         let mut j = body_id;
         let lambda = |x: usize| -> i32 { self.parent[x] as i32 - 1 };
@@ -1415,7 +1588,7 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
                 .view_mut((0, idx_j), (6, self.joint_dims[j]))
                 .copy_from(&jac_j);
         }
-        jacobian_deriv
+        Ok(jacobian_deriv)
     }
 
     /// Computes the regressor matrix for the multibody system. The function takes in body regressors in each link frame, as well as joint_regressors.
@@ -1463,7 +1636,7 @@ impl<const NUM_BODIES: usize, const NUM_DOFS: usize> MultiBody<NUM_BODIES, NUM_D
         // Cache Ad(h_i^{-1}) for reuse (avoids repeated inverse computations)
         let mut Ad_h_inv_cache = vec![Matrix6::zeros(); NUM_BODIES];
 
-        let g = self.compute_body_configurations(conf);
+        let g = self.try_compute_body_configurations(conf)?;
 
         let lambda = |x: usize| -> i32 { self.parent[x] as i32 - 1 };
 
